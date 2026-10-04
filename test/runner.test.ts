@@ -376,3 +376,12 @@ test('конфиг ставится в home идентичности с прав
   assert.ok(JSON.parse(readFileSync(installed, 'utf8')).provider.ladder.options.apiKey.includes('{env:K}'));
   await rm(home, { recursive: true, force: true });
 });
+
+test('getent-парсинг даёт uid и gid из строки passwd', () => {
+  // Регрессия: `id -u -g` — недопустимая комбинация «only»-флагов, GNU id отвечает
+  // «cannot print "only" of more than one choice». Парсим `getent passwd` вместо этого.
+  const line = 'ocrun-abc:x:1001:1001:OpenCode run identity:/home/ocrun-abc:/bin/bash';
+  const [uidRaw = '0', gidRaw = '0'] = line.trim().split(':').slice(2, 4);
+  assert.equal(Number(uidRaw), 1001);
+  assert.equal(Number(gidRaw), 1001);
+});

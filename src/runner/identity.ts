@@ -96,8 +96,10 @@ export async function createRunIdentity(options: IdentityOptions): Promise<Ident
   }
 
   await exec('sudo', ['useradd', '--create-home', '--shell', '/bin/bash', name]);
-  const { stdout: passwd } = await exec('id', ['-u', '-g', name]);
-  const [uidRaw = '0', gidRaw = '0'] = passwd.trim().split(/\s+/);
+  // `id -u -g` не сработает: оба флага — «only», и GNU id отвечает
+  // «cannot print "only" of more than one choice». Берём строку passwd целиком.
+  const { stdout: passwd } = await exec('getent', ['passwd', name]);
+  const [uidRaw = '0', gidRaw = '0'] = passwd.trim().split(':').slice(2, 4);
   const uid = Number(uidRaw);
   const gid = Number(gidRaw);
   const home = `/home/${name}`;

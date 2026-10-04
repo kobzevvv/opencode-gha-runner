@@ -309,7 +309,10 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
             // и прямая запись из процесса раннера падает с EACCES.
             const staging = path.join(workspaceRoot, 'session-logs', runId, 'opencode.json');
             await mkdir(path.dirname(staging), { recursive: true });
-            await writeFile(staging, contents, { encoding: 'utf8', mode: 0o600 });
+            // 0644, а не 0600: файл читает идентичность рана, а пишет раннер. Секрета
+            // в нём нет — `apiKey` это ссылка `{env:ИМЯ}`, значение приходит в
+            // процесс агента из claim'а.
+            await writeFile(staging, contents, { encoding: 'utf8', mode: 0o644 });
             await runUnderIdentity(identityOfRun, 'cp', [staging, target], {
               PATH: process.env['PATH'] ?? '/usr/bin:/bin',
               HOME: identityOfRun.home,

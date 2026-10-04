@@ -71,6 +71,21 @@ GET /v1/runs/{runId} → 200, status=succeeded, exitReason=completed, failure=nu
 потолки `maxOutputBytes`/`maxLogBytes` на настоящем ранне (покрыты тестами) и
 отмена живого GitHub-прогона (покрыта тестом на клиенте).
 
+### Remote MCP — проверено сквозняком
+
+Прогон `37218346623`, 04.10.2026: GHA-джоба подключилась к remote MCP через интернет и
+агент вызвал инструмент:
+
+```
+POST /v1/launch     → mcp.servers.trained-skills = {type:"remote", url, headers:{Authorization:"Bearer {env:AGENT_MCP_TOKEN}"}}
+job                  → agent config installed (mcp servers: 1)
+MCP через интернет   → initialize → tools/list → tools/call, auth: Bearer rt_stub_token_abc123
+agent                → вызвал trained-skills_stub_ping, получил STUB_PONG
+```
+
+Токен пришёл из `mcpSecrets` и в конфиг не попал — в файле осталась ссылка
+`{env:AGENT_MCP_TOKEN}`, opencode подставил её на старте.
+
 ## Локальный запуск и приёмка
 
 ```bash

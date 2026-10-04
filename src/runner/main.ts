@@ -21,7 +21,7 @@
 
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { appendFile, chmod, mkdir, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
@@ -323,7 +323,12 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
               PATH: process.env['PATH'] ?? '/usr/bin:/bin',
               HOME: identityOfRun.home,
             });
-            await chmod(target, 0o600);
+            // chmod — тоже под идентичностью: файл теперь принадлежит UID рана, и
+            // раннер на нём получает EPERM.
+            await runUnderIdentity(identityOfRun, 'chmod', ['600', target], {
+              PATH: process.env['PATH'] ?? '/usr/bin:/bin',
+              HOME: identityOfRun.home,
+            });
           },
         });
         logLine(`agent config installed: ${agentConfigPath}`);

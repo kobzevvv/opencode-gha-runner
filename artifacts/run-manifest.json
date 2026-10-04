@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "runId": "run_real_1791144545",
+  "jobId": "job-e2e-1",
+  "exitReason": "completed",
+  "exitCode": 0,
+  "durationMs": 28724,
+  "artifacts": [],
+  "missingOutputs": [
+    "report.md"
+  ],
+  "startedAt": "2026-10-04T20:09:36.032Z",
+  "finishedAt": "2026-10-04T20:10:58.495Z"
+}

@@ -50,11 +50,32 @@ GitHub Actions: .github/workflows/run-agent.yml
 `AGENT_TIMEOUT`, `AGENT_CRASH`, `AGENT_NONZERO_EXIT`, `WORKER_INTERNAL`,
 `ISOLATION_UNSUPPORTED`.
 
+## Что проверено на настоящем прогоне
+
+Прогон `37214618976`, 04.10.2026 — полный цикл от `POST /v1/launch` до `LaunchResult`:
+
+```
+POST /v1/launch     → 202 started, githubRunId 37214618976
+job claim            → spec с llmKey получен, claim-токен погашен
+identity             → ocrun-18eftw8 uid=1002 enforced=true
+agent config         → /home/ocrun-18eftw8/.config/opencode/opencode.json
+agent                → opencode -m ladder/free: exitReason=completed, 9166 ms
+artifacts            → 1 файл в ветку opencode-gha-runner/<runId>, commit e618b05
+GET /v1/runs/{runId} → 200, status=succeeded, exitReason=completed, failure=null
+```
+
+`report.md` из артефактов содержит `# E2E отчёт`, sha256 совпадает с тем, что
+воркер вернул в `LaunchResult`. Лог сессии приложен к прогону как артефакт.
+
+Что при этом **не** проверено: выгрузка лога в Google Storage (`LOG_UPLOAD=local`),
+потолки `maxOutputBytes`/`maxLogBytes` на настоящем ранне (покрыты тестами) и
+отмена живого GitHub-прогона (покрыта тестом на клиенте).
+
 ## Локальный запуск и приёмка
 
 ```bash
 npm ci
-npm run verify     # typecheck + 74 теста + сквозной прогон контракта по HTTP
+npm run verify     # typecheck + 85 тестов + сквозной прогон контракта по HTTP
 npm run dev        # шлюз на :8787 — нужен, чтобы дёргать руками
 npm run smoke      # поднимает шлюз, прогоняет launch → poll → claim → result → cancel
 ```
@@ -143,6 +164,14 @@ npx wrangler deploy
 6. **Артефакты кладутся в ветку `opencode-gha-runner/<runId>`**, а не в дефолтную. Имя
    детерминированное, наш API может вычислить его сам; история пользователя не трогается.
    `cwd` не используется как префикс — в нём могут быть символы, недопустимые в ветке.
+7. **`HOME` агента при изоляции игнорирует значение из запроса.** Наш API присылает
+   `HOME` рабочего окружения, но процесс идёт под UID рана, и opencode падает с
+   `PermissionDenied` на `$HOME/.local/share/opencode/log`. При
+   `isolation.mode = per_run_unix_identity` `HOME` подставляется из идентичности;
+   без изоляции переданное значение уважается.
+8. **Изоляция ставится через `sudo -u`, а не `setpriv --reuid`.** У процесса раннера
+   нет `CAP_SETUID` — есть только passwordless sudo, поэтому прямой вызов `setpriv`
+   падал с `setresuid failed: Operation not permitted`, и изоляция не работала.
 
 ## Границы, которые стоит знать
 

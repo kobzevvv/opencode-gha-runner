@@ -299,7 +299,6 @@ export function buildManifest(options: {
   durationMs: number;
   artifacts: ArtifactRef[];
   missingOutputs: string[];
-  logUrl: string;
   startedAt: string;
   finishedAt: string;
 }): Buffer {
@@ -314,7 +313,6 @@ export function buildManifest(options: {
         durationMs: options.durationMs,
         artifacts: options.artifacts,
         missingOutputs: options.missingOutputs,
-        logUrl: options.logUrl,
         startedAt: options.startedAt,
         finishedAt: options.finishedAt,
       },

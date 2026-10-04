@@ -390,7 +390,6 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
           durationMs: outcome.durationMs,
           artifacts: collected.artifacts,
           missingOutputs: collected.missing,
-          logUrl: '',
           startedAt: startedAt.toISOString(),
           finishedAt: new Date().toISOString(),
         }),

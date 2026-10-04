@@ -121,15 +121,8 @@ export async function createRunIdentity(options: IdentityOptions): Promise<Ident
   return { name, uid, gid, home, workspace, enforced: true };
 }
 
-/**
- * Добавляет `a+x` на каждом родителе workspace вплоть до корня.
- *
- * Только execute-бит, не read и не write: идентичность получает возможность пройти
- * через каталог, но не получает доступа к его содержимому. Без этого любой
- * непривилегированный пользователь не может попасть в workspace, даже если сам
- * workspace принадлежит ему, — и `git clone` падает с «Permission denied».
- */
-export async function ensureTraversable(workspace: string): Promise<void> {
+/** Родители `workspace` вплоть до корня, без самого workspace. */
+export function parentDirs(workspace: string): string[] {
   const absolute = path.resolve(workspace);
   const parents: string[] = [];
   let current = path.dirname(absolute);
@@ -137,8 +130,25 @@ export async function ensureTraversable(workspace: string): Promise<void> {
     parents.push(current);
     current = path.dirname(current);
   }
-  for (const parent of parents) {
-    await exec('sudo', ['chmod', 'a+x', parent]);
+  return parents;
+}
+
+/**
+ * Добавляет `a+x` на каждом родителе workspace вплоть до корня.
+ *
+ * Только execute-бит, не read и не write: идентичность получает возможность пройти
+ * через каталог, но не получает доступа к его содержимому. Без этого любой
+ * непривилегированный пользователь не может попасть в workspace, даже если сам
+ * workspace принадлежит ему, — и `git clone` падает с «Permission denied».
+ *
+ * `run` инъектируется, чтобы проверка не зависела от наличия sudo на хосте.
+ */
+export async function ensureTraversable(
+  workspace: string,
+  run: (args: string[]) => Promise<unknown> = (args) => exec('sudo', ['chmod', 'a+x', ...args]),
+): Promise<void> {
+  for (const parent of parentDirs(workspace)) {
+    await run([parent]);
   }
 }
 

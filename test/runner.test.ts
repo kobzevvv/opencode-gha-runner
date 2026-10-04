@@ -100,17 +100,18 @@ test('имя идентичности не ломается на управля�
   assert.ok(!name.includes('/') && !name.includes('.'));
 });
 
-test('под изоляцией запуск идёт через setpriv с UID рана', () => {
+test('под изоляцией запуск идёт через sudo -u, а не setpriv', () => {
+  // Регрессия: `setpriv --reuid` требует CAP_SETUID, которого у процесса раннера
+  // нет — есть только passwordless sudo. Прямой вызов падал с
+  // `setresuid failed: Operation not permitted`, и изоляция не ставилась вообще.
   const { command, argv } = buildLaunchCommand({
     identity: { ...baseIdentity, enforced: true },
     binary: '/usr/local/bin/opencode',
     argv: ['run', 'промпт'],
     env: { PATH: '/usr/bin' },
   });
-  assert.equal(command, 'setpriv');
-  assert.ok(argv.includes('--reuid=1234'));
-  assert.ok(argv.includes('--regid=1234'));
-  assert.ok(argv.includes('--init-groups'));
+  assert.equal(command, 'sudo');
+  assert.deepEqual(argv.slice(0, 3), ['-u', 'ocrun-abc', '--']);
   // Каталог бинаря обязан быть в PATH агента: иначе opencode не найдёт node.
   const envIndex = argv.indexOf('env');
   const binaryIndex = argv.indexOf('/usr/local/bin/opencode');

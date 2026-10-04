@@ -224,17 +224,13 @@ export function buildLaunchCommand(args: LaunchIdentityArgs): { command: string;
   if (!args.identity.enforced) {
     return { command: 'env', argv: inner };
   }
-  const { uid, gid } = args.identity;
+  // Через `sudo -u`, а не через `setpriv --reuid`: setpriv меняет uid только
+  // при наличии CAP_SETUID, а у процесса раннера его нет — он получает только
+  // passwordless sudo. Прямой вызов давал `setpriv: setresuid failed:
+  // Operation not permitted`, то есть изоляция не ставилась вообще.
   return {
-    command: 'setpriv',
-    argv: [
-      `--reuid=${uid}`,
-      `--regid=${gid}`,
-      '--init-groups',
-      '--',
-      'env',
-      ...inner,
-    ],
+    command: 'sudo',
+    argv: ['-u', args.identity.name, '--', 'env', ...inner],
   };
 }
 

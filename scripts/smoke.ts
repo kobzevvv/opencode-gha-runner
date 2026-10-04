@@ -152,7 +152,9 @@ console.log('   → 409 claim_invalid');
 console.log('8. POST /v1/runs/{runId}/report — джоба кладёт результат');
 const resultPayload = {
   runId: 'подделанный',
-  status: 'succeeded',
+  // Контракт: `status` — это «движок запустился», а не «чем кончился ран».
+  status: 'started',
+  pid: null,
   exitCode: 0,
   exitSignal: null,
   exitReason: 'completed',

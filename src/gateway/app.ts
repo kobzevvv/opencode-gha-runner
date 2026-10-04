@@ -342,6 +342,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     return {
       runId: run.runId,
       status: 'failed',
+      pid: null,
       exitCode: null,
       exitSignal: 'SIGTERM',
       exitReason: 'cancelled',
@@ -353,7 +354,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
       outputTruncated: false,
       artifacts: [],
       logUrl: '',
-      repo: { fullName: run.request.repository.fullName, branch: run.request.repository.branch, commit: null },
+      repo: { fullName: run.request.repository.fullName, branch: run.request.repository.branch, commit: '0'.repeat(40) },
     };
   }
 

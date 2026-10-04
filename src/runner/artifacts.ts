@@ -150,10 +150,19 @@ function isInside(root: string, candidate: string): boolean {
   return relative.length > 0 && !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
+/**
+ * Null-SHA git: собственный маркер «коммита нет». Валидатор нашего API требует
+ * непустую строку в `repo.commit`, поэтому в случае неудачного пуша отдаём именно его,
+ * а не выдуманный хэш и не пустоту.
+ */
+export const NULL_SHA = '0'.repeat(40);
+
 export interface PushResult {
   fullName: string;
-  commit: string | null;
+  commit: string;
   branch: string;
+  /** Ветка, от которой ответвлялся ран, — чтобы наш API знал базу для merge. */
+  baseRef?: string;
   pushed: string[];
 }
 
@@ -239,7 +248,7 @@ export class GitHubRepoApi {
     files: Array<{ path: string; content: Buffer }>;
   }): Promise<PushResult> {
     if (options.files.length === 0) {
-      return { fullName: this.repo, commit: null, branch: options.branch, pushed: [] };
+      return { fullName: this.repo, commit: NULL_SHA, branch: options.branch, pushed: [] };
     }
 
     const base = await this.defaultBranchSha();
@@ -282,10 +291,12 @@ export class GitHubRepoApi {
       }
     }
 
+    const head = await this.branchSha(options.branch);
     return {
       fullName: this.repo,
-      commit: await this.branchSha(options.branch),
+      commit: head ?? NULL_SHA,
       branch: options.branch,
+      ...(base ? { baseRef: base.branch } : {}),
       pushed,
     };
   }

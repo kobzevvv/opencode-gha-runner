@@ -64,13 +64,22 @@ export async function writeWebResponse(response: Response, res: ServerResponse):
 export function startNodeServer(options: NodeServerOptions): Promise<RunningServer> {
   const requestedPort = options.port ?? 8787;
   const host = options.host ?? '127.0.0.1';
-  const gateway = createGateway(options);
+  // Gateway собирается после listen: `publicBaseUrl` попадает в `statusUrl`/`resultUrl`
+  // квитанции, и при `port: 0` его можно узнать только из связанного сокета. Иначе
+  // квитанция указывала бы на несуществующий адрес — молча, до первого запроса.
+  let gateway: ReturnType<typeof createGateway> | null = null;
 
   const server: Server = createServer((req, res) => {
     void (async () => {
       try {
         const origin = `http://${req.headers.host ?? `${host}:${requestedPort}`}`;
-        await writeWebResponse(await gateway.fetch(await toWebRequest(req, origin)), res);
+        const app = gateway;
+        if (!app) {
+          res.writeHead(503, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'gateway_not_ready' }));
+          return;
+        }
+        await writeWebResponse(await app.fetch(await toWebRequest(req, origin)), res);
       } catch (cause) {
         res.writeHead(500, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: 'node_transport_error', message: String(cause) }));
@@ -86,9 +95,15 @@ export function startNodeServer(options: NodeServerOptions): Promise<RunningServ
     const onListening = (): void => {
       server.off('error', onError);
       const port = (server.address() as AddressInfo | null)?.port ?? requestedPort;
+      const url = `http://${host}:${port}`;
+      // Если адрес не задан явно (или в нём остался `:0`), берём фактический — иначе
+      // квитанция вела бы в никуда.
+      const declared = options.config.publicBaseUrl;
+      const publicBaseUrl = declared && !declared.endsWith(':0') ? declared : url;
+      gateway = createGateway({ ...options, config: { ...options.config, publicBaseUrl } });
       resolve({
         port,
-        url: `http://${host}:${port}`,
+        url,
         close: () =>
           new Promise<void>((done, fail) => {
             server.close((error) => (error ? fail(error) : done()));

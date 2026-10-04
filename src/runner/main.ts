@@ -34,7 +34,7 @@ import {
   type LaunchRequest,
   type LaunchResult,
 } from '../contracts.js';
-import { GitHubRepoApi, artifactBranch, buildManifest, collectArtifacts } from './artifacts.js';
+import { GitHubRepoApi, NULL_SHA, buildManifest, collectArtifacts } from './artifacts.js';
 import { resolveAgentEnv, runAgent } from './exec.js';
 import { createRunIdentity, destroyRunIdentity, isBinaryAvailable, runUnderIdentity, type Identity } from './identity.js';
 import { installAgentConfig } from './agent-config.js';
@@ -128,8 +128,10 @@ function emptyResult(
     outputTruncated: false,
     artifacts: [],
     logUrl: '',
-    repo: { fullName: repo.fullName, branch: repo.branch, commit: null },
+    repo: { fullName: repo.fullName, branch: repo.branch, commit: NULL_SHA },
     ...partial,
+    // `pid` фиксирован: его не должен перебить ни один вызов.
+    pid: null,
   };
 }
 
@@ -375,10 +377,10 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     // ── 5. артефакты в репозиторий юзера ───────────────────────────────────────
     const collected = await collectArtifacts(workspace, spec.outputs);
     let artifactRefs: ArtifactRef[] = [];
-    let repoResult: { fullName: string; branch: string; commit: string | null } = {
+    let repoResult: { fullName: string; branch: string; commit: string } = {
       fullName: spec.repository.fullName,
       branch: spec.repository.branch,
-      commit: null,
+      commit: NULL_SHA,
     };
     const repoApi = new GitHubRepoApi({ token: artifactsToken, repo: spec.repository.fullName });
 
@@ -452,7 +454,13 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
 
     const result: LaunchResult = {
       runId,
-      status: outcome.exitReason === 'completed' ? 'succeeded' : 'failed',
+      // `started` — движок отработал (в том числе с ненулевым кодом или таймаутом).
+      // `failed` зарезервирован за «воркер не смог запустить», и такие случаи уходят
+      // через emptyResult() до этой точки.
+      status: 'started',
+      // pid процесса агента: агент живёт в GHA-джобе, на другой машине, поэтому здесь
+      // честный null, а не pid процесса, который к нему отношения не имеет.
+      pid: null,
       exitCode: outcome.exitCode,
       exitSignal: outcome.exitSignal,
       exitReason: outcome.exitReason,

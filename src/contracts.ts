@@ -128,7 +128,14 @@ export interface LaunchRequest {
 // LaunchResult — что воркер возвращает нашему API
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type LaunchStatus = 'started' | 'failed' | 'running' | 'succeeded' | 'cancelled';
+/**
+ * Статус в `LaunchResult` — это «запустился ли процесс», а не «чем кончился ран».
+ *
+ * `started` — движок отработал (в том числе с ненулевым кодом, таймаутом или сигналом:
+ * процесс-то был); `failed` — воркер не смог его запустить. Итог рана читается из
+ * `exitReason`, а не отсюда.
+ */
+export type LaunchStatus = 'started' | 'failed';
 
 export type ExitReason =
   | 'completed'
@@ -161,6 +168,12 @@ export interface ArtifactRef {
 export interface LaunchResult {
   runId: string;
   status: LaunchStatus;
+  /**
+   * pid процесса агента. Обязательное поле контракта, но в GHA-джобе он чужой:
+   * агент живёт на другой машине, поэтому здесь всегда `null` — это честнее, чем
+   * подставить pid процесса, который к агенту отношения не имеет.
+   */
+  pid: number | null;
   exitCode: number | null;
   exitSignal: string | null;
   exitReason: ExitReason;
@@ -173,8 +186,14 @@ export interface LaunchResult {
   outputTruncated: boolean;
   artifacts: ArtifactRef[];
   logUrl: string;
-  /** Куда лёг результат: ветка пришла от нашего API, commit — HEAD этой ветки. */
-  repo: { fullName: string; branch: string; commit: string | null; baseRef?: string };
+  /**
+   * Куда лёг результат: ветка пришла от нашего API, `commit` — HEAD этой ветки.
+   *
+   * `commit` обязан быть непустой строкой (так требует валидатор нашего API), поэтому
+   * когда ничего не запушено, отдаётся null-SHA git (`0…0`) — его собственный маркер
+   * «коммита нет», а не выдуманный хэш.
+   */
+  repo: { fullName: string; branch: string; commit: string; baseRef?: string };
   failure?: Failure;
 }
 

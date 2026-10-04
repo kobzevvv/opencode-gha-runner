@@ -72,7 +72,9 @@ export function workerStatus(run: StoredRun): WorkerRunStatus {
   if (run.phase === 'done') {
     const exitReason = run.result?.exitReason;
     if (exitReason === 'cancelled') return 'cancelled';
-    return run.result?.status === 'succeeded' ? 'succeeded' : 'failed';
+    // Итог рана определяется `exitReason`, а не `LaunchResult.status`: последний говорит
+    // только «движок запустился», и `nonzero_exit` там тоже `started`.
+    return exitReason === 'completed' ? 'succeeded' : 'failed';
   }
   if (run.phase === 'claimed' || run.phase === 'running') return 'running';
   return 'accepted';

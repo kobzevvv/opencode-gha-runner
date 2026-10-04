@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "runId": "run_e2e_1791129123",
+  "jobId": "job-e2e-1",
+  "exitReason": "completed",
+  "exitCode": 0,
+  "durationMs": 9166,
+  "artifacts": [
+    {
+      "path": "artifacts/report.md",
+      "name": "report.md",
+      "mime": "text/markdown",
+      "sha256": "e4b2120db966455ead3bf2c3311c761e9c920a43be39ef7fe6d5fc7dd12a8349",
+      "size": 17
+    }
+  ],
+  "missingOutputs": [],
+  "logUrl": "",
+  "startedAt": "2026-10-04T15:52:34.836Z",
+  "finishedAt": "2026-10-04T15:53:12.382Z"
+}

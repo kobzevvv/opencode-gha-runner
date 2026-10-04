@@ -78,7 +78,7 @@ jobs:
           # Passwordless sudo — штатное свойство GitHub-hosted раннера, поэтому
           # per_run_unix_identity ставится по-настоящему, а не имитируется.
           ALLOW_SUDO: 'true'
-        run: node dist/runner/main.js
+        run: node dist/src/runner/main.js
 
       - name: Publish session log
         if: always()

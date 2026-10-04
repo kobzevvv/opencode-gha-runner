@@ -139,13 +139,22 @@ function emptyResult(runId: string, repoFullName: string, partial: Partial<Launc
  * Отклонение от ТЗ: клонирует воркер, а не наш API. У GHA-джобы нет общей файловой
  * системы с нашим API — «уже склонированный workspace» через HTTP не передаётся.
  */
-async function cloneWorkspace(spec: LaunchRequest, workspace: string, token: string): Promise<void> {
+async function cloneWorkspace(
+  spec: LaunchRequest,
+  workspace: string,
+  token: string,
+  home: string,
+): Promise<void> {
   await mkdir(workspace, { recursive: true });
   const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
   await exec('git', ['clone', '--depth', '1', '--quiet', `https://github.com/${spec.repository.fullName}.git`, workspace], {
     env: {
       PATH: process.env['PATH'] ?? '/usr/bin:/bin',
-      HOME: process.env['HOME'] ?? '/home/runner',
+      // HOME обязан быть home идентичности, а не раннера: процесс идёт под UID
+      // рана, и git не смог бы писать в `$HOME/.config/git`. Сообщение об ошибке
+      // при этом врёт — падает на `.git` внутри принадлежащего идентичности
+      // каталога, потому что git умирает раньше, на своём конфиге.
+      HOME: home,
       GIT_TERMINAL_PROMPT: '0',
       GIT_CONFIG_COUNT: '1',
       GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
@@ -262,7 +271,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     }
 
     try {
-      await cloneWorkspace(spec, workspace, artifactsToken);
+      await cloneWorkspace(spec, workspace, artifactsToken, identity.home);
     } catch (cause) {
       const safeSummary = redact(cause instanceof Error ? cause.message : String(cause), artifactsToken);
       logLine(`clone failed: ${safeSummary}`);

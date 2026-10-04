@@ -106,6 +106,10 @@ export async function createRunIdentity(options: IdentityOptions): Promise<Ident
 
   await exec('sudo', ['mkdir', '-p', workspace]);
   await exec('sudo', ['chown', '-R', `${uid}:${gid}`, workspace]);
+  // Идентичность обязана уметь дойти до своего workspace. `runner.temp` и прочие
+  // каталоги раннера обычно 700, и без `a+x` на каждом родителе git падает с
+  // «Permission denied» уже внутри принадлежащего идентичности каталога.
+  await ensureTraversable(workspace);
   // Бинари и кеши — только на чтение: агент не должен переписывать opencode.
   if (options.sharedBinDir) {
     await exec('sudo', ['chmod', '-R', 'a+rX', options.sharedBinDir]);
@@ -115,6 +119,27 @@ export async function createRunIdentity(options: IdentityOptions): Promise<Ident
   await exec('sudo', ['-u', name, 'sh', '-c', `mkdir -p ${JSON.stringify(`${home}/.cache`)} ${JSON.stringify(`${home}/.config`)}`]);
 
   return { name, uid, gid, home, workspace, enforced: true };
+}
+
+/**
+ * Добавляет `a+x` на каждом родителе workspace вплоть до корня.
+ *
+ * Только execute-бит, не read и не write: идентичность получает возможность пройти
+ * через каталог, но не получает доступа к его содержимому. Без этого любой
+ * непривилегированный пользователь не может попасть в workspace, даже если сам
+ * workspace принадлежит ему, — и `git clone` падает с «Permission denied».
+ */
+export async function ensureTraversable(workspace: string): Promise<void> {
+  const absolute = path.resolve(workspace);
+  const parents: string[] = [];
+  let current = path.dirname(absolute);
+  while (current !== path.dirname(current)) {
+    parents.push(current);
+    current = path.dirname(current);
+  }
+  for (const parent of parents) {
+    await exec('sudo', ['chmod', 'a+x', parent]);
+  }
 }
 
 export async function destroyRunIdentity(identity: Identity): Promise<void> {

@@ -219,7 +219,9 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     // ── 3. workspace и идентичность рана ───────────────────────────────────────
     const workspaceRoot = env.WORKSPACE_ROOT ?? process.env['RUNNER_WORKSPACE'] ?? process.cwd();
     const workspace = path.resolve(workspaceRoot, path.basename(spec.cwd));
-    await rm(workspace, { recursive: true, force: true });
+    // Через sudo: прошлый рана мог оставить каталог, принадлежащий своей идентичности,
+    // и обычный `rm` его не удалит.
+    await exec('sudo', ['rm', '-rf', workspace]);
 
     identity = await createRunIdentity({
       runId,

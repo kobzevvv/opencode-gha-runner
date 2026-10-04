@@ -7,14 +7,14 @@
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, mkdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { AGENT_CONFIG_TEMPLATE, installAgentConfig, renderAgentConfig } from '../src/runner/agent-config.js';
 import { collectArtifacts, artifactBranch } from '../src/runner/artifacts.js';
 import { capOutput, resolveAgentEnv, runAgent } from '../src/runner/exec.js';
-import { buildChildPath, buildLaunchCommand, identityName, type Identity } from '../src/runner/identity.js';
+import { buildChildPath, buildLaunchCommand, detectSudo, ensureTraversable, identityName, type Identity } from '../src/runner/identity.js';
 
 const baseIdentity: Identity = {
   name: 'ocrun-abc',
@@ -384,4 +384,23 @@ test('getent-парсинг даёт uid и gid из строки passwd', () =>
   const [uidRaw = '0', gidRaw = '0'] = line.trim().split(':').slice(2, 4);
   assert.equal(Number(uidRaw), 1001);
   assert.equal(Number(gidRaw), 1001);
+});
+
+test('ensureTraversable возвращает идентичности проход через родителей', { skip: !(await detectSudo()) }, async () => {
+  // Регрессия: `runner.temp` — 700, и идентичность не могла дойти до своего
+  // workspace, хотя сам workspace ей принадлежал. `git clone` падал с
+  // «Permission denied» уже внутри принадлежащего каталога.
+  const root = await mkdtemp(path.join(tmpdir(), 'gha-trav-'));
+  const workspace = path.join(root, 'a', 'b', 'c');
+  await mkdir(workspace, { recursive: true });
+  const blocked = path.join(root, 'a');
+  await chmod(blocked, 0o700);
+
+  await ensureTraversable(workspace);
+
+  // Проход через заблокированного родителя снова возможен: каталог стал 711.
+  const mode = (await stat(blocked)).mode & 0o777;
+  assert.ok(mode & 0o100, `родитель обязан получить execute-бит, получено ${mode.toString(8)}`);
+  assert.ok(!(mode & 0o400), 'read-бит добавлять нельзя — иначе идентичность увидит содержимое');
+  await rm(root, { recursive: true, force: true });
 });

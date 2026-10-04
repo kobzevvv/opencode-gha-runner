@@ -190,7 +190,7 @@ export class GitHubRepoApi {
   constructor(options: GitHubRepoApiOptions) {
     this.token = options.token;
     this.repo = options.repo;
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
   }
 
   private async request<T>(method: string, apiPath: string, body?: unknown): Promise<{ status: number; data: T }> {

@@ -118,6 +118,9 @@ export class MemoryRunStore implements RunStore {
     if (!run || run.claimToken !== claimToken || run.phase === 'done') return null;
     if (run.phase === 'claimed' || run.phase === 'running') return null;
     run.phase = 'claimed';
+    // Статус сменился accepted → running, значит и `updatedAt` обязан смениться:
+    // наш API отличает «ран стоит» от «ран поехал» именно по нему.
+    run.updatedAt = Date.now();
     return structuredClone(run);
   }
 
@@ -195,6 +198,7 @@ export class KvRunStore implements RunStore {
     if (!run || run.claimToken !== claimToken || run.phase === 'done') return null;
     if (run.phase === 'claimed' || run.phase === 'running') return null;
     run.phase = 'claimed';
+    run.updatedAt = Date.now();
     await this.kv.put(runKey(run.runId), JSON.stringify(run), { expirationTtl: this.ttlSeconds });
     return run;
   }

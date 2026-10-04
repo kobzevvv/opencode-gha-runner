@@ -271,7 +271,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
    * в лог уходит причина без тела результата.
    */
   async function deliverToApi(resultUrl: string, result: LaunchResult): Promise<void> {
-    const fetchImpl = deps.fetchImpl ?? fetch;
+    const fetchImpl = deps.fetchImpl ?? fetch.bind(globalThis);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         const response = await fetchImpl(resultUrl, {

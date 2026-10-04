@@ -200,6 +200,31 @@ curl -sS -X POST http://127.0.0.1:8787/v1/launch \
 `GITHUB_TOKEN` джобы для этого не годится: он ограничен одним репозиторием, а артефакты
 кладутся в репозиторий пользователя.
 
+## Развёрнутый шлюз
+
+```
+URL     https://opencode-gha-runner-gateway.skillset-apply.workers.dev
+движок  dynamic-ip-azure-agent-run (и любой другой алиас — имя не валидируется)
+```
+
+Секреты (`WORKER_TOKEN`, `GITHUB_TOKEN`) лежат в Cloudflare, `WORKER_TOKEN` — ещё и в
+keychain под `WORKER_TOKEN` / `opencode-gha-runner-gateway`. В репозиторий они не
+попадают. KV namespace `RUNS` — `c1eb5647663b429f8f1e913b5353bd55`.
+
+Проверено на боевом развёртывании: прогон `run_cf_1791147093` прошёл
+`accepted → running → succeeded` через Workers, `GET /result` вернул контрактный
+`LaunchResult`, артефакт лёг в ветку `agent-run/<runId>`, которую задал API.
+
+### Две ошибки, которые видны только на Workers
+
+Обе поймались первым же боевым прогоном, локально их не было:
+
+- **`Buffer is not defined`.** В Workers нет Node-глобала. `Buffer.byteLength` в
+  валидации заменён на `TextEncoder`.
+- **`Illegal invocation: function called with incorrect 'this' reference`.** `fetch`,
+  положенный в поле объекта и вызванный как `this.fetchImpl(...)`, теряет `this`.
+  Теперь `fetch.bind(globalThis)`.
+
 ## Деплой шлюза
 
 ```bash

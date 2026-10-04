@@ -50,7 +50,9 @@ export class GitHubClient {
     this.workflow = options.workflow;
     this.ref = options.ref;
     this.baseUrl = options.baseUrl ?? 'https://api.github.com';
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    // Привязка к globalThis обязательна: в Cloudflare Workers `fetch`, отвязанный от
+    // `this` (например, положенный в поле объекта), падает с «Illegal invocation».
+    this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
     this.userAgent = options.userAgent ?? 'opencode-gha-runner';
   }
 

@@ -1,13 +1,13 @@
 name = "opencode-gha-runner-gateway"
 main = "dist/src/worker.js"
 compatibility_date = "2024-12-30"
-workers_dev = false
+workers_dev = true
 
 # KV держит раны между `launch` и `result`. TTL задан в коде (RUN_TTL_SECONDS),
 # потому что Cloudflare KV не умеет применять TTL при каждой записи.
 [[kv_namespaces]]
 binding = "RUNS"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "c1eb5647663b429f8f1e913b5353bd55"
 
 # Секреты задаются через `wrangler secret put`, а не в этом файле:
 #   wrangler secret put WORKER_TOKEN
@@ -21,7 +21,7 @@ id = "REPLACE_WITH_KV_NAMESPACE_ID"
 [vars]
 GITHUB_REPO = "vovalikessmoothy-png/opencode-gha-runner"
 GITHUB_WORKFLOW = "run-agent.yml"
-PUBLIC_BASE_URL = "https://opencode-gha-runner-gateway.example.workers.dev"
+PUBLIC_BASE_URL = "https://opencode-gha-runner-gateway.skillset-apply.workers.dev"
 AGENT_BINARY = "opencode"
 
 [observability]

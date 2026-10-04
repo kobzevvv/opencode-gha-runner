@@ -312,11 +312,20 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Длина строки в UTF-8 без Node-глобала: шлюз едет в Cloudflare Worker, где его нет.
+ * `TextEncoder` есть и в Workers, и в Node.
+ */
+const utf8Encoder = new TextEncoder();
+function utf8Length(value: string): number {
+  return utf8Encoder.encode(value).length;
+}
+
 /** Относительный путь без выхода из workspace — та же проверка, что и у нас в API. */
 export function isSafeRelativePath(value: unknown): value is string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 1024) return false;
   if (value.startsWith('/') || value.includes('\\')) return false;
-  if (Buffer.byteLength(value, 'utf8') > 4096) return false;
+  if (utf8Length(value) > 4096) return false;
   return !value
     .split('/')
     .some((segment) => segment === '' || segment === '.' || segment === '..');
@@ -393,7 +402,7 @@ export function validateLaunchRequest(input: unknown): LaunchRequest {
     const prompt = req['input']['inlinePrompt'];
     if (typeof prompt !== 'string' || prompt.trim().length === 0) {
       issues.push('input.inlinePrompt: expected a non-empty string');
-    } else if (Buffer.byteLength(prompt, 'utf8') > MAX_PROMPT_BYTES) {
+    } else if (utf8Length(prompt) > MAX_PROMPT_BYTES) {
       issues.push(`input.inlinePrompt: exceeds ${MAX_PROMPT_BYTES} bytes`);
     }
   }

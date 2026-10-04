@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "runId": "run_cf_1791154359",
+  "jobId": "job-e2e-1",
+  "exitReason": "completed",
+  "exitCode": 0,
+  "durationMs": 12586,
+  "artifacts": [
+    {
+      "path": "artifacts/report.md",
+      "name": "report.md",
+      "mime": "text/markdown",
+      "sha256": "b404391aafcd31be17164c4a87c30aa09e17c6dd617676caf17c58d428b5ab07",
+      "size": 44
+    }
+  ],
+  "missingOutputs": [],
+  "startedAt": "2026-10-04T22:53:12.948Z",
+  "finishedAt": "2026-10-04T22:54:08.795Z"
+}

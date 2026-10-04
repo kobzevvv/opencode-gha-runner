@@ -86,6 +86,37 @@ agent                → вызвал trained-skills_stub_ping, получил S
 Токен пришёл из `mcpSecrets` и в конфиг не попал — в файле осталась ссылка
 `{env:AGENT_MCP_TOKEN}`, opencode подставил её на старте.
 
+### Настоящий MCP — проверено на живом агенте
+
+Прогон `37230999370`, 04.10.2026: GHA-джоба дёрнула настоящий MCP на VM агента и
+получила реальный ответ:
+
+```
+POST /mcp/token     → run-токен для профиля (Bearer AGENT_SECRET)
+POST /v1/launch     → mcp.servers.trained-skills = {type:"remote", url:"http://136.65.7.197:8080/mcp", headers:{Authorization:"Bearer {env:AGENT_MCP_TOKEN}"}}
+job                  → agent config installed (mcp servers: 1)
+MCP через интернет   → tools/list → 347 инструментов профиля → tools/call list_skills
+agent                → получил реальный каталог скилов профиля, exitReason=completed, 28724 ms
+```
+
+Эндпоинт — `POST /mcp` в `trained-assist-agent` (PR [#2106](https://github.com/trained-assist/trained-assist-agent/pull/2106),
+замержен). Ядро MCP не тронуто: `tools/call` идёт через `runMcpTool()`, который
+спавнит per-user child с правильным `USER_ID`.
+
+#### Как устроен доступ к агенту
+
+`recruiter-assistant.ru` в DNS указывает на **RU VM** (178.212.14.192, ru-edge),
+а не на агента. Агент — `136.65.7.197:8080` (`vm: gcp-main`), прямой IP, HTTP.
+`136-65-7-197.sslip.io` для `/mcp` отдаёт 404 — nginx там его не проксирует.
+
+Значит URL для GHA — `http://136.65.7.197:8080/mcp`. Это **открытый HTTP**, и токен
+едет по сети в открытом виде. Для приёмки это приемлемо; для боя нужен TLS перед
+агентом (или туннель), иначе токен перехватывается на любом хопе.
+
+`AGENT_SECRET` лежит в keychain (`AGENT_SECRET` / `trained-assist-agent`) и в
+GCP Secret Manager. В репозиторий он не попадает: шлюз вызывает `POST /mcp/token`
+сам и кладёт run-токен в `mcpSecrets`, а джоба видит только токен.
+
 ## Локальный запуск и приёмка
 
 ```bash

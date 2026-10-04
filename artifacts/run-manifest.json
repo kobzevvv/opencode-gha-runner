@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "runId": "run_refactor_1791157810",
+  "jobId": "job-e2e-1",
+  "exitReason": "completed",
+  "exitCode": 0,
+  "durationMs": 12533,
+  "artifacts": [
+    {
+      "path": "artifacts/report.md",
+      "name": "report.md",
+      "mime": "text/markdown",
+      "sha256": "fe6f4e4b68f1ed6b47b8c5658c83bc2236573d4c55e9580ce1097f60453b233e",
+      "size": 42
+    }
+  ],
+  "missingOutputs": [],
+  "startedAt": "2026-10-04T23:50:44.205Z",
+  "finishedAt": "2026-10-04T23:51:09.753Z"
+}

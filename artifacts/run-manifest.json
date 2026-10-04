@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "runId": "run_e2e_1791128625",
+  "jobId": "job-e2e-1",
+  "exitReason": "nonzero_exit",
+  "exitCode": 1,
+  "durationMs": 556,
+  "artifacts": [],
+  "missingOutputs": [
+    "report.md"
+  ],
+  "logUrl": "",
+  "startedAt": "2026-10-04T15:44:14.939Z",
+  "finishedAt": "2026-10-04T15:45:14.233Z"
+}

@@ -241,3 +241,20 @@ export function buildLaunchCommand(args: LaunchIdentityArgs): { command: string;
 export async function isBinaryAvailable(binary: string): Promise<boolean> {
   return (await resolveBinaryAbsolute(binary)) !== null;
 }
+
+/**
+ * Запускает произвольную команду под идентичностью рана.
+ *
+ * Нужно для всего, что пишет в workspace: клон, установка зависимостей, сам агент.
+ * Пока клон шёл под пользователем раннера, а workspace принадлежал идентичности —
+ * `git clone` падал с «Permission denied» на `.git`, потому что создать каталог внутри
+ * чужого 755-каталога раннер не мог.
+ */
+export function execAsIdentity(
+  identity: Identity,
+  command: string,
+  argv: string[],
+  env: Record<string, string>,
+): { command: string; argv: string[] } {
+  return buildLaunchCommand({ identity, binary: command, argv, env });
+}

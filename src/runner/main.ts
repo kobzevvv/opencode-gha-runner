@@ -313,6 +313,12 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
             // в нём нет — `apiKey` это ссылка `{env:ИМЯ}`, значение приходит в
             // процесс агента из claim'а.
             await writeFile(staging, contents, { encoding: 'utf8', mode: 0o644 });
+            // `cp` не создаёт промежуточные каталоги, а `~/.config/opencode` у
+            // свежесозданного пользователя отсутствует.
+            await runUnderIdentity(identityOfRun, 'mkdir', ['-p', path.dirname(target)], {
+              PATH: process.env['PATH'] ?? '/usr/bin:/bin',
+              HOME: identityOfRun.home,
+            });
             await runUnderIdentity(identityOfRun, 'cp', [staging, target], {
               PATH: process.env['PATH'] ?? '/usr/bin:/bin',
               HOME: identityOfRun.home,

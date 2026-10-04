@@ -103,6 +103,7 @@ export async function createRunIdentity(options: IdentityOptions): Promise<Ident
   const uid = Number(uidRaw);
   const gid = Number(gidRaw);
   const home = `/home/${name}`;
+  const identity: Identity = { name, uid, gid, home, workspace, enforced: true };
 
   await exec('sudo', ['mkdir', '-p', workspace]);
   await exec('sudo', ['chown', '-R', `${uid}:${gid}`, workspace]);
@@ -115,10 +116,13 @@ export async function createRunIdentity(options: IdentityOptions): Promise<Ident
     await exec('sudo', ['chmod', '-R', 'a+rX', options.sharedBinDir]);
   }
 
-  // HOME ран�� переопределяет системный: иначе агент писал бы в ~/.local/share раннера.
-  await exec('sudo', ['-u', name, 'sh', '-c', `mkdir -p ${JSON.stringify(`${home}/.cache`)} ${JSON.stringify(`${home}/.config`)}`]);
+  // HOME рана переопределяет системный: иначе агент писал бы в ~/.local/share раннера.
+  await runUnderIdentity(identity, 'mkdir', ['-p', `${home}/.cache`, `${home}/.config`], {
+    PATH: MINIMAL_PATH,
+    HOME: home,
+  });
 
-  return { name, uid, gid, home, workspace, enforced: true };
+  return identity;
 }
 
 /** Родители `workspace` вплоть до корня, без самого workspace. */

@@ -179,6 +179,13 @@ export function resolveAgentEnv(options: {
    * `PermissionDenied: FileSystem.open`.
    */
   isolationEnforced?: boolean;
+  /**
+   * Секреты, которые наш API объявил отдельным каналом (`mcpSecrets`), а не через
+   * `envAllowlist`. Инъектируются в процесс агента под своими именами и redacted из
+   * любого вывода — ровно как `llmKey`. Через `env` их пропускать нельзя: `env` по
+   * контракту пробрасывается дословно и может попасть в лог.
+   */
+  injectedSecrets?: Record<string, string>;
 }): Record<string, string> {
   const allow = new Set(options.envAllowlist);
   const resolved: Record<string, string> = {};
@@ -200,6 +207,10 @@ export function resolveAgentEnv(options: {
 
   if (options.llmKey.length > 0) {
     resolved[options.llmKeyEnvName] = options.llmKey;
+  }
+
+  for (const [name, value] of Object.entries(options.injectedSecrets ?? {})) {
+    if (value.length > 0) resolved[name] = value;
   }
 
   for (const [name, value] of Object.entries(options.extra ?? {})) {

@@ -75,7 +75,7 @@ GET /v1/runs/{runId} → 200, status=succeeded, exitReason=completed, failure=nu
 
 ```bash
 npm ci
-npm run verify     # typecheck + 85 тестов + сквозной прогон контракта по HTTP
+npm run verify     # typecheck + 97 тестов + сквозной прогон контракта по HTTP
 npm run dev        # шлюз на :8787 — нужен, чтобы дёргать руками
 npm run smoke      # поднимает шлюз, прогоняет launch → poll → claim → result → cancel
 ```
@@ -105,6 +105,37 @@ curl -sS -X POST http://127.0.0.1:8787/v1/launch \
     "credentials": { "llmKey": "…" }
   }'
 ```
+
+## Remote MCP
+
+Агенту рана можно подключить remote MCP-серверы — через поле `mcp` в `LaunchRequest`:
+
+```jsonc
+"mcp": {
+  "servers": {
+    "trained-skills": {
+      "type": "remote",
+      "url": "https://recruiter-assistant.ru/mcp",
+      "headers": { "Authorization": "Bearer {env:AGENT_MCP_TOKEN}" }
+    }
+  }
+},
+"mcpSecrets": { "AGENT_MCP_TOKEN": "rt_…" }
+```
+
+`mcpSecrets` — отдельный канал от `env`: `env` по контракту пробрасывается в процесс
+агента дословно и может попасть в лог, а секреты MCP не должны. Значения из
+`mcpSecrets` инъектируются в окружение агента под своими именами и redacted из любого
+вывода, как `llmKey`.
+
+Токен в конфиг не пишется: заголовок остаётся ссылкой `{env:ИМЯ}`, opencode подставляет
+её на старте (проверено на живом opencode 1.18.34). Конфиг лежит в
+`~/.config/opencode/opencode.json` идентичности рана — вне workspace, поэтому в
+артефакты не попадает.
+
+Поддерживается только `type: "remote"`. Локальный stdio-сервер в GHA-джобе бессмыслен
+(настоящий MCP живёт на VM агента — там его секреты, состояние и браузер), а разрешать
+произвольную команду из запроса — это RCE в публичном CI.
 
 ## Что нужно настроить в репозитории
 

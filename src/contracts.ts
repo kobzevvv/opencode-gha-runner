@@ -61,6 +61,26 @@ export interface LaunchCredentials {
   envName?: string;
 }
 
+/**
+ * Remote MCP-сервер, который агент должен видеть.
+ *
+ * Только `remote`: локальный stdio-сервер в GHA-джобе бессмыслен, потому что
+ * настоящий MCP живёт на VM агента — там его секреты, состояние и браузер
+ * (`agent-mcp-bridge.js` в `trained-assist-agent` держит ровно эту границу).
+ * Значения в `headers` могут ссылаться на env как `{env:ИМЯ}`; тогда само значение
+ * приходит в `mcpSecrets` и в конфиг не попадает — opencode подставляет его на старте.
+ */
+export interface McpRemoteServerSpec {
+  type: 'remote';
+  url: string;
+  headers?: Record<string, string>;
+  enabled?: boolean;
+}
+
+export interface McpSpec {
+  servers: Record<string, McpRemoteServerSpec>;
+}
+
 export interface LaunchRequest {
   runId: string;
   jobId: string;
@@ -81,6 +101,14 @@ export interface LaunchRequest {
   outputs?: OutputSpec[];
   /** Опционально: только если наш API сам кладёт ключ в `envAllowlist`. */
   credentials?: LaunchCredentials;
+  /** Remote MCP-серверы, которые подключаются к агенту рана. */
+  mcp?: McpSpec;
+  /**
+   * Секреты для `{env:ИМЯ}` в `mcp.headers`. Отдельно от `env`, потому что `env` —
+   * это то, что разрешено пробросить в процесс, а это значения, которые вообще не
+   * должны оказаться в конфиге на диске и в логе. Redacted так же, как `llmKey`.
+   */
+  mcpSecrets?: Record<string, string>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -373,6 +401,53 @@ export function validateLaunchRequest(input: unknown): LaunchRequest {
       issues.push('credentials.llmKey: expected a string of at least 8 chars');
     } else if (req['credentials']['envName'] !== undefined && !ENV_NAME.test(String(req['credentials']['envName']))) {
       issues.push('credentials.envName: invalid env name');
+    }
+  }
+
+  if (req['mcp'] !== undefined) {
+    if (!isPlainObject(req['mcp'])) {
+      issues.push('mcp: expected an object');
+    } else if (!isPlainObject(req['mcp']['servers'])) {
+      issues.push('mcp.servers: expected an object');
+    } else {
+      for (const [name, server] of Object.entries(req['mcp']['servers'])) {
+        if (!ENV_NAME.test(name) && !/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
+          issues.push(`mcp.servers.${name}: invalid server name`);
+          continue;
+        }
+        if (!isPlainObject(server)) {
+          issues.push(`mcp.servers.${name}: expected an object`);
+          continue;
+        }
+        // Только `remote`: локальный stdio-сервер в GHA-джобе бессмыслен, а
+        // разрешать произвольную команду из запроса — это RCE в публичном CI.
+        if (server['type'] !== 'remote') {
+          issues.push(`mcp.servers.${name}.type: only "remote" is supported`);
+        }
+        if (typeof server['url'] !== 'string' || !/^https?:\/\//.test(server['url'])) {
+          issues.push(`mcp.servers.${name}.url: expected an http(s) URL`);
+        }
+        if (server['headers'] !== undefined) {
+          if (!isPlainObject(server['headers'])) {
+            issues.push(`mcp.servers.${name}.headers: expected an object`);
+          } else {
+            for (const [header, value] of Object.entries(server['headers'])) {
+              if (typeof value !== 'string') issues.push(`mcp.servers.${name}.headers.${header}: expected a string`);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (req['mcpSecrets'] !== undefined) {
+    if (!isPlainObject(req['mcpSecrets'])) {
+      issues.push('mcpSecrets: expected an object');
+    } else {
+      for (const [name, value] of Object.entries(req['mcpSecrets'])) {
+        if (!ENV_NAME.test(name)) issues.push(`mcpSecrets.${name}: invalid env name`);
+        if (typeof value !== 'string' || value.length === 0) issues.push(`mcpSecrets.${name}: expected a non-empty string`);
+      }
     }
   }
 

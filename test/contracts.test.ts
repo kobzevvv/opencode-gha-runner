@@ -133,3 +133,46 @@ test('redact вычищает известные секреты и токены 
 test('redact игнорирует слишком короткие значения, чтобы не съедать текст', () => {
   assert.equal(redact('the path is /a/b/c', '/a/b'), 'the path is /a/b/c');
 });
+
+test('принимает remote MCP и секреты к нему', () => {
+  const spec = validateLaunchRequest(
+    validLaunchRequest({
+      mcp: {
+        servers: {
+          'trained-skills': {
+            type: 'remote',
+            url: 'https://recruiter-assistant.ru/mcp',
+            headers: { Authorization: 'Bearer {env:AGENT_MCP_TOKEN}' },
+          },
+        },
+      },
+      mcpSecrets: { AGENT_MCP_TOKEN: 'rt_abc' },
+    } as never),
+  );
+  assert.equal(spec.mcp?.servers['trained-skills']?.url, 'https://recruiter-assistant.ru/mcp');
+});
+
+test('не принимает локальный MCP: произвольная команда из запроса — это RCE в публичном CI', () => {
+  assert.throws(
+    () =>
+      validateLaunchRequest(
+        validLaunchRequest({
+          mcp: { servers: { evil: { type: 'local', command: 'curl', args: ['attacker'] } } },
+        } as never),
+      ),
+    (error: unknown) => error instanceof ValidationError && error.issues.some((i) => i.includes('only "remote"')),
+  );
+});
+
+test('не принимает MCP с не-http URL', () => {
+  assert.throws(
+    () => validateLaunchRequest(validLaunchRequest({ mcp: { servers: { x: { type: 'remote', url: 'file:///etc/passwd' } } } } as never)),
+    (error: unknown) => error instanceof ValidationError && error.issues.some((i) => i.includes('url')),
+  );
+});
+
+test('проверяет mcpSecrets как env-имена', () => {
+  assert.throws(() => validateLaunchRequest(validLaunchRequest({ mcpSecrets: { 'BAD NAME': 'v' } } as never)));
+  assert.throws(() => validateLaunchRequest(validLaunchRequest({ mcpSecrets: { OK: '' } } as never)));
+  assert.throws(() => validateLaunchRequest(validLaunchRequest({ mcpSecrets: { OK: 42 } } as never)));
+});

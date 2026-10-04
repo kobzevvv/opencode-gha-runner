@@ -190,7 +190,8 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     claim = (await claimResponse.json()) as ClaimPayload;
     const spec = claim.spec;
     const reportUrl = `${gatewayUrl}${RESULT_PATH(runId)}`;
-    const secrets = [claim.llmKey, env.ARTIFACTS_TOKEN];
+    const mcpSecrets = spec.mcpSecrets ?? {};
+    const secrets = [claim.llmKey, env.ARTIFACTS_TOKEN, ...Object.values(mcpSecrets)];
 
     logLine(`claimed job=${spec.jobId} timeout=${spec.limits.timeoutMs}ms outputs=${spec.outputs?.length ?? 0}`);
 
@@ -303,6 +304,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
         agentConfigPath = await installAgentConfig({
           identityHome: identityOfRun.home,
           llmKeyEnvName: claim.llmKeyEnvName,
+          mcpServers: spec.mcp?.servers,
           write: async (target, contents) => {
             // Конфиг готовим в каталоге раннера, куда есть доступ от обоих UID, и
             // переносим под идентичность: `~/.config/opencode` принадлежит UID рана,
@@ -331,7 +333,8 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
             });
           },
         });
-        logLine(`agent config installed: ${agentConfigPath}`);
+        const mcpCount = Object.keys(spec.mcp?.servers ?? {}).length;
+        logLine(`agent config installed: ${agentConfigPath}${mcpCount > 0 ? ` (mcp servers: ${mcpCount})` : ''}`);
       } catch (cause) {
         const safeSummary = redact(cause instanceof Error ? cause.message : String(cause));
         logLine(`agent config not installed: ${safeSummary}`);
@@ -346,6 +349,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       llmKeyEnvName: claim.llmKeyEnvName,
       llmKey: claim.llmKey,
       isolationEnforced: identity.enforced,
+      injectedSecrets: mcpSecrets,
     });
     const extraArgs = (env.AGENT_ARGS ?? '').split(' ').filter(Boolean);
     const agentArgs = [...extraArgs, 'run', spec.input.inlinePrompt];

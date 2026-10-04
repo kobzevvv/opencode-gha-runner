@@ -347,7 +347,7 @@ test('ветка артефактов детерминированная и не
 
 test('в конфиг агента попадает ссылка на ключ, а не сам ключ', () => {
   const template = readFileSync(AGENT_CONFIG_TEMPLATE, 'utf8');
-  const rendered = renderAgentConfig(template, 'MY_CUSTOM_KEY');
+  const rendered = renderAgentConfig(template, { llmKeyEnvName: 'MY_CUSTOM_KEY' });
   assert.ok(!rendered.includes('llm-key'));
   const config = JSON.parse(rendered) as { provider: Record<string, { options: { apiKey: string } }> };
   for (const provider of Object.values(config.provider)) {
@@ -436,4 +436,61 @@ test('без изоляции переданный HOME уважается', () 
     llmKey: '',
   });
   assert.equal(env['HOME'], '/home/runner');
+});
+
+// ── remote MCP ─────────────────────────────────────────────────────────────────
+
+test('remote MCP попадает в конфиг, а токен остаётся ссылкой {env:...}', () => {
+  const rendered = renderAgentConfig(readFileSync(AGENT_CONFIG_TEMPLATE, 'utf8'), {
+    llmKeyEnvName: 'LLM_LADDER_TOKEN',
+    mcpServers: {
+      'trained-skills': {
+        type: 'remote',
+        url: 'https://recruiter-assistant.ru/mcp',
+        headers: { Authorization: 'Bearer {env:AGENT_MCP_TOKEN}' },
+      },
+    },
+  });
+  const config = JSON.parse(rendered) as {
+    mcp: Record<string, { type: string; url: string; headers: Record<string, string>; enabled: boolean }>;
+  };
+  assert.equal(config.mcp['trained-skills']!.type, 'remote');
+  assert.equal(config.mcp['trained-skills']!.url, 'https://recruiter-assistant.ru/mcp');
+  assert.equal(config.mcp['trained-skills']!.headers['Authorization'], 'Bearer {env:AGENT_MCP_TOKEN}');
+  assert.equal(config.mcp['trained-skills']!.enabled, true);
+  assert.ok(!rendered.includes('rt_'), 'самого токена в конфиге быть не должно — только ссылка на env');
+});
+
+test('несколько MCP-серверов и выключенный сервер', () => {
+  const rendered = renderAgentConfig(readFileSync(AGENT_CONFIG_TEMPLATE, 'utf8'), {
+    llmKeyEnvName: 'K',
+    mcpServers: {
+      'trained-skills': { type: 'remote', url: 'https://a.example/mcp' },
+      hh: { type: 'remote', url: 'https://b.example/mcp', enabled: false },
+    },
+  });
+  const config = JSON.parse(rendered) as { mcp: Record<string, { enabled: boolean; headers?: unknown }> };
+  assert.deepEqual(Object.keys(config.mcp).sort(), ['hh', 'trained-skills']);
+  assert.equal(config.mcp['hh']!.enabled, false);
+  assert.equal(config.mcp['trained-skills']!.enabled, true);
+  assert.equal(config.mcp['trained-skills']!.headers, undefined, 'без заголовков ключа быть не должно');
+});
+
+test('без mcp серверов ключ mcp в конфиг не добавляется', () => {
+  const rendered = renderAgentConfig(readFileSync(AGENT_CONFIG_TEMPLATE, 'utf8'), { llmKeyEnvName: 'K' });
+  const config = JSON.parse(rendered) as Record<string, unknown>;
+  assert.ok(!('mcp' in config), 'пустая секция mcp в конфиге не нужна');
+});
+
+test('mcpSecrets доезжают в env агента под своими именами', () => {
+  const env = resolveAgentEnv({
+    envAllowlist: ['PATH'],
+    env: { PATH: '/usr/bin' },
+    identityHome: '/home/ocrun-abc',
+    llmKeyEnvName: 'LLM_LADDER_TOKEN',
+    llmKey: 'llm-key',
+    injectedSecrets: { AGENT_MCP_TOKEN: 'rt_abc123' },
+  });
+  assert.equal(env['AGENT_MCP_TOKEN'], 'rt_abc123');
+  assert.equal(env['LLM_LADDER_TOKEN'], 'llm-key');
 });

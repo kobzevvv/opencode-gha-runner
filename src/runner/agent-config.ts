@@ -20,10 +20,13 @@
  * свой — поэтому ни workspace, ни чужой репозиторий не видят этой записи.
  */
 
+import { execFile } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import type { McpRemoteServerSpec } from '../contracts.js';
+import { MINIMAL_PATH, type Identity } from './identity.js';
 
 /** Шаблон лежит в репозитории воркера; в `dist` он лежит на две директории выше. */
 export const AGENT_CONFIG_TEMPLATE = fileURLToPath(new URL('../../../agent/opencode.json', import.meta.url));
@@ -96,5 +99,47 @@ export async function installAgentConfig(options: {
     await mkdir(path.dirname(target), { recursive: true });
     await writeFile(target, rendered, { encoding: 'utf8', mode: 0o600 });
   }
+  return target;
+}
+
+const exec = promisify(execFile);
+
+/**
+ * Ставит конфиг агента под идентичностью рана.
+ *
+ * Отдельная функция, потому что запись конфиг�� — самая неприятная часть джобы по
+ * числу неочевидных требований, и в `main()` она размывала весь шаг:
+ *
+ *   - `~/.config/opencode` принадлежит UID рана, поэтому пишет **раннер** в свой
+ *     каталог, а переносит под идентичность (`cp` даёт EPERM на чужой файл, а
+ *     `mkdir`/`chmod` оттуда — EACCES/EPERM);
+ *   - staging-файл нужен читаемым (`0644`): его читает идентичность, а пишет раннер;
+ *     секрета в нём нет — `apiKey` это ссылка `{env:ИМЯ}`;
+ *   - `cp` не создаёт промежуточные каталоги, а `~/.config/opencode` у
+ *     свежесозданного пользователя отсутствует;
+ *   - `chmod 600` — тоже под идентичностью: после `cp` файл принадлежит UID рана.
+ */
+export async function installAgentConfigUnderIdentity(options: {
+  identity: Identity;
+  llmKeyEnvName: string;
+  mcpServers?: Record<string, McpRemoteServerSpec>;
+  /** Каталог, доступный обоим UID — staging пишется туда. */
+  stagingDir: string;
+}): Promise<string> {
+  const { identity } = options;
+  const env = { PATH: MINIMAL_PATH, HOME: identity.home };
+  const staging = path.join(options.stagingDir, 'opencode.json');
+
+  await mkdir(options.stagingDir, { recursive: true });
+  const rendered = renderAgentConfig(
+    await readFile(AGENT_CONFIG_TEMPLATE, 'utf8'),
+    { llmKeyEnvName: options.llmKeyEnvName, mcpServers: options.mcpServers },
+  );
+  await writeFile(staging, rendered, { encoding: 'utf8', mode: 0o644 });
+
+  const target = path.join(identity.home, '.config', 'opencode', 'opencode.json');
+  await exec('sudo', ['-u', identity.name, '--', 'mkdir', '-p', path.dirname(target)], { env });
+  await exec('sudo', ['-u', identity.name, '--', 'cp', staging, target], { env });
+  await exec('sudo', ['-u', identity.name, '--', 'chmod', '600', target], { env });
   return target;
 }

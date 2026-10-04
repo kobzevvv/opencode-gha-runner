@@ -61,8 +61,5 @@ export const CANCEL_PATH = (runId: string): string => `/v1/runs/${encodeURICompo
  */
 export const REPORT_PATH = (runId: string): string => `/v1/runs/${encodeURIComponent(runId)}/report`;
 
-/** Обратная совместимость: `RUN_PATH` больше не существует как маршрут. */
-export const RUN_PATH = (runId: string): string => `/v1/runs/${encodeURIComponent(runId)}`;
-
 /** Имя переменной по умолчанию — совпадает с тем, чем наш API пользуется для llm-ladder. */
 export const DEFAULT_LLM_KEY_ENV = 'LLM_LADDER_TOKEN';

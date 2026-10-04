@@ -9,7 +9,6 @@
 
 import {
   API_RESULT_PATH,
-  CANCEL_PATH,
   CLAIM_PATH,
   DEFAULT_LLM_KEY_ENV,
   REPORT_PATH,
@@ -19,7 +18,6 @@ import {
 import {
   ENGINE_NAME,
   ValidationError,
-  clampTimeout,
   failure,
   isSafeWorkflowName,
   redact,
@@ -335,7 +333,8 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     return json(run.result, 200, noStore());
   }
 
-  async function handleCancel(request: Request, runId: string): Promise<Response> {
+  // Авторизацию проверяет роутер: до обработчика доживает только валидный токен.
+async function handleCancel(runId: string): Promise<Response> {
     const run = await store.get(runId);
     if (!run) return json({ status: 'unknown_run' }, 200, noStore());
     if (run.phase === 'done') {
@@ -408,7 +407,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
           const runId = decodeURIComponent(path.split('/')[3]!);
           const denied = requireWorkerAuth(request);
           if (denied) return denied;
-          return await handleCancel(request, runId);
+          return await handleCancel(runId);
         }
 
         if (request.method === 'GET' && /^\/v1\/runs\/[^/]+\/status$/.test(path)) {
@@ -444,27 +443,6 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
       }
     },
   };
-}
-
-/** Удобная обёртка для `curl` в тестах и в приёмке. */
-export async function pollUntilDone(
-  gatewayUrl: string,
-  runId: string,
-  workerToken: string,
-  options: { attempts?: number; intervalMs?: number } = {},
-): Promise<LaunchResult> {
-  const attempts = options.attempts ?? 120;
-  const intervalMs = options.intervalMs ?? 2000;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    // Контракт: пока ран не терминальный, `/result` отвечает 409. Поэтому опрос — это
-    // «пока 409, ждём», а не чтение отдельного поля.
-    const response = await fetch(`${gatewayUrl}${API_RESULT_PATH(runId)}`, {
-      headers: { authorization: `Bearer ${workerToken}` },
-    });
-    if (response.status === 200) return (await response.json()) as LaunchResult;
-    await sleep(intervalMs);
-  }
-  throw new Error(`run ${runId} did not finish within ${attempts * intervalMs}ms`);
 }
 
 export type { LaunchRequest };

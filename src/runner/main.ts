@@ -21,7 +21,7 @@
 
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { appendFile, mkdir, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
@@ -30,14 +30,16 @@ import {
   clampTimeout,
   failure,
   redact,
+  type AnswerSource,
   type ArtifactRef,
+  type Failure,
   type LaunchRequest,
   type LaunchResult,
 } from '../contracts.js';
-import { GitHubRepoApi, NULL_SHA, buildManifest, collectArtifacts } from './artifacts.js';
-import { resolveAgentEnv, runAgent } from './exec.js';
+import { GitHubRepoApi, NULL_SHA, buildManifest, collectArtifacts, type CollectResult } from './artifacts.js';
+import { resolveAgentEnv, runAgent, type ExecOutcome } from './exec.js';
 import { createRunIdentity, destroyRunIdentity, isBinaryAvailable, runUnderIdentity, type Identity } from './identity.js';
-import { installAgentConfig } from './agent-config.js';
+import { installAgentConfigUnderIdentity } from './agent-config.js';
 import { uploadSessionLog, type LogUploadMode } from './logs.js';
 
 const exec = promisify(execFile);
@@ -166,6 +168,218 @@ async function cloneWorkspace(
   });
 }
 
+/** Шаг, который может отказать до старта агента. */
+type Step<T> = { ok: true; value: T } | { ok: false; failure: Failure; exit: number };
+
+interface PreparedWorkspace {
+  identity: Identity;
+  workspace: string;
+  artifactsToken: string;
+  logFile: string;
+}
+
+/**
+ * Готовит workspace рана: идентичность, права, клон репозитория.
+ *
+ * Отказы собираются здесь, а не размазываются по `main()`: раньше на каждый отказ
+ * приходилось повторять `await report(...); return RUNNER_EXIT.x`, и из-за этого
+ * добавление новой проверки было легче пропустить, чем сделать.
+ *
+ * Функция владеет идентичностью до успешного возврата: на любом отказе после
+ * `createRunIdentity` она убирает её сама, иначе пользователь остался бы висеть в
+ * системе, а `finally` в `main()` до него уже не добрался бы.
+ */
+async function prepareWorkspace(options: {
+  env: RunnerEnv;
+  spec: LaunchRequest;
+  runId: string;
+  allowSudo: boolean;
+}): Promise<Step<PreparedWorkspace>> {
+  const { env, spec, runId, allowSudo } = options;
+  const workspaceRoot = env.WORKSPACE_ROOT ?? process.env['RUNNER_WORKSPACE'] ?? process.cwd();
+  const workspace = path.resolve(workspaceRoot, path.basename(spec.cwd));
+  // Через sudo: прошлый рана мог оставить каталог, принадлежащий своей идентичности,
+  // и обычный `rm` его не удалит.
+  await exec('sudo', ['rm', '-rf', workspace]);
+
+  const identity = await createRunIdentity({
+    runId,
+    workspace,
+    allowSudo,
+    sharedBinDir: process.env['RUNNER_TOOL_CACHE'] ?? undefined,
+  });
+
+  const refuse = async (failure: Failure, exit: number): Promise<Step<PreparedWorkspace>> => {
+    await destroyRunIdentity(identity);
+    return { ok: false, failure, exit };
+  };
+
+  if (spec.isolation.mode === 'per_run_unix_identity' && !identity.enforced) {
+    return refuse(
+      failure(
+        'ISOLATION_UNSUPPORTED',
+        'preflight',
+        'passwordless sudo is unavailable on this runner, per_run_unix_identity cannot be enforced',
+      ),
+      RUNNER_EXIT.preflightRefused,
+    );
+  }
+  logLine(`identity=${identity.name} uid=${identity.uid} enforced=${identity.enforced}`);
+
+  const artifactsToken = env.ARTIFACTS_TOKEN ?? '';
+  if (artifactsToken.length === 0) {
+    return refuse(
+      failure(
+        'WORKER_INTERNAL',
+        'preflight',
+        'ARTIFACTS_TOKEN is unset: the runner cannot clone repository.fullName nor push artifacts',
+      ),
+      RUNNER_EXIT.preflightRefused,
+    );
+  }
+
+  try {
+    await cloneWorkspace(spec, workspace, artifactsToken, identity);
+  } catch (cause) {
+    const safeSummary = redact(cause instanceof Error ? cause.message : String(cause), artifactsToken);
+    logLine(`clone failed: ${safeSummary}`);
+    return refuse(
+      failure('WORKER_INTERNAL', 'engine', `clone of ${spec.repository.fullName} failed: ${safeSummary}`),
+      RUNNER_EXIT.cloneFailed,
+    );
+  }
+
+  // Лог сессии живёт ВНЕ workspace. Workspace принадлежит идентичности рана
+  // (755, owner — uid рана), и процесс раннера не может писать в него: `EACCES
+  // ... mkdir .agent`. Кроме того, агент не должен видеть свой же лог в
+  // собственной рабочей папке, а артефакты собираются из объявленных путей.
+  return {
+    ok: true,
+    value: {
+      identity,
+      workspace,
+      artifactsToken,
+      logFile: path.join(workspaceRoot, 'session-logs', runId, 'session.log'),
+    },
+  };
+}
+
+interface RepoRef {
+  fullName: string;
+  branch: string;
+  commit: string;
+}
+
+/**
+ * Кладёт выходы рана в репозиторий юзера.
+ *
+ * Ветку задаёт наше API (`repository.branch`), а не воркер: только API знает `runId`,
+ * и ветка — единица результата, которую API мержит одним действием.
+ *
+ * Неудача пуша не фатальна: она уходит в `stderr` ответа, потому что ран-то отработал,
+ * и наш API должен увидеть его итог, а не потерять из-за проблемы с git.
+ */
+async function publishArtifacts(options: {
+  spec: LaunchRequest;
+  runId: string;
+  workspace: string;
+  token: string;
+  collected: CollectResult;
+  outcome: ExecOutcome;
+  startedAt: Date;
+  sessionLog: SessionLog;
+}): Promise<{ artifactRefs: ArtifactRef[]; repo: RepoRef; note: string | null }> {
+  const { spec, runId, workspace, token, collected, outcome, startedAt, sessionLog } = options;
+  const fallback: RepoRef = { fullName: spec.repository.fullName, branch: spec.repository.branch, commit: NULL_SHA };
+
+  const files: Array<{ path: string; content: Buffer }> = [];
+  for (const artifact of collected.artifacts) {
+    const source = path.resolve(workspace, artifact.path.replace(/^artifacts\//, ''));
+    try {
+      files.push({ path: artifact.path, content: readFileSync(source) });
+    } catch {
+      logLine(`declared output vanished before push: ${artifact.path}`);
+    }
+  }
+  // Манифест кладём всегда: результат должен читаться из ветки, даже если выходов нет.
+  files.push({
+    path: 'artifacts/run-manifest.json',
+    content: buildManifest({
+      runId,
+      jobId: spec.jobId,
+      exitReason: outcome.exitReason,
+      exitCode: outcome.exitCode,
+      durationMs: outcome.durationMs,
+      artifacts: collected.artifacts,
+      missingOutputs: collected.missing,
+      startedAt: startedAt.toISOString(),
+      finishedAt: new Date().toISOString(),
+    }),
+  });
+
+  try {
+    const pushed = await new GitHubRepoApi({ token, repo: spec.repository.fullName }).pushFiles({
+      branch: spec.repository.branch,
+      commitMessage: `opencode-gha-runner: ${runId} (${outcome.exitReason})`,
+      files,
+    });
+    sessionLog.append(
+      'stdout',
+      `\npushed ${pushed.pushed.length} file(s) to ${pushed.fullName}@${pushed.branch} @ ${pushed.commit}\n`,
+    );
+    return {
+      artifactRefs: collected.artifacts,
+      repo: { fullName: pushed.fullName, branch: pushed.branch, commit: pushed.commit },
+      note: null,
+    };
+  } catch (cause) {
+    const safeSummary = redact(cause instanceof Error ? cause.message : String(cause), token);
+    logLine(`artifact push failed: ${safeSummary}`);
+    return { artifactRefs: [], repo: fallback, note: `artifact push failed: ${safeSummary}` };
+  }
+}
+
+/**
+ * Собирает `LaunchResult`. Чистая функция — поэтому её форма (ровно то, что валидирует
+ * наш API) проверяется тестом, а не только боевым прогоном.
+ */
+export function buildLaunchResult(input: {
+  runId: string;
+  outcome: ExecOutcome;
+  answer: { text?: string; source: AnswerSource };
+  artifacts: ArtifactRef[];
+  repo: RepoRef;
+  logUrl: string;
+  outputTruncated: boolean;
+  failure?: Failure;
+}): LaunchResult {
+  const { outcome } = input;
+  return {
+    runId: input.runId,
+    // `started` — движок отработал (в том числе с ненулевым кодом или таймаутом).
+    // `failed` зарезервирован за «воркер не смог запустить», и такие случаи уходят
+    // через emptyResult() до этой точки.
+    status: 'started',
+    // pid процесса агента: агент живёт в GHA-джобе, на другой машине, поэтому здесь
+    // честный null, а не pid процесса, который к нему отношения не имеет.
+    pid: null,
+    exitCode: outcome.exitCode,
+    exitSignal: outcome.exitSignal,
+    exitReason: outcome.exitReason,
+    stdout: outcome.stdout,
+    stderr: outcome.stderr,
+    answer: input.answer.text,
+    answerSource: input.answer.source,
+    durationMs: outcome.durationMs,
+    timedOut: outcome.timedOut,
+    outputTruncated: input.outputTruncated,
+    artifacts: input.artifacts,
+    logUrl: input.logUrl,
+    repo: input.repo,
+    ...(input.failure ? { failure: input.failure } : {}),
+  };
+}
+
 export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv): Promise<number> {
   const gatewayUrl = env.GATEWAY_URL?.replace(/\/+$/, '');
   const { RUN_ID: runId, CLAIM_TOKEN: claimToken } = env;
@@ -196,106 +410,52 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     claim = (await claimResponse.json()) as ClaimPayload;
     const spec = claim.spec;
     const reportUrl = `${gatewayUrl}${REPORT_PATH(runId)}`;
+    // Локальная копия: в замыкании narrowing по `claim` не работает.
+    const reportToken = claim.reportToken;
     const mcpSecrets = spec.mcpSecrets ?? {};
     const secrets = [claim.llmKey, env.ARTIFACTS_TOKEN, ...Object.values(mcpSecrets)];
 
     logLine(`claimed job=${spec.jobId} timeout=${spec.limits.timeoutMs}ms outputs=${spec.outputs?.length ?? 0}`);
 
+    /**
+     * Отказ до старта агента: наш API получает `LaunchResult` с `failure`, а не тишину.
+     * Одно место на все отказы — иначе каждая новая проверка повторяет этот ритуал,
+     * и однажды его забудут.
+     */
+    const refuse = async (f: Failure, exit: number): Promise<number> => {
+      await report(reportUrl, reportToken, emptyResult(runId, spec.repository, { failure: f }));
+      return exit;
+    };
+
     // ── 2. preflight: бинарь агента и изоляция ─────────────────────────────────
     if (!(await isBinaryAvailable(claim.agentBinary))) {
-      await report(
-        reportUrl,
-        claim.reportToken,
-        emptyResult(runId, spec.repository, {
-          failure: failure('AGENT_BINARY_MISSING', 'preflight', `agent binary "${claim.agentBinary}" not found`),
-        }),
+      return refuse(
+        failure('AGENT_BINARY_MISSING', 'preflight', `agent binary "${claim.agentBinary}" not found`),
+        RUNNER_EXIT.preflightRefused,
       );
-      return RUNNER_EXIT.preflightRefused;
     }
 
     const allowSudo = (env.ALLOW_SUDO ?? 'true') !== 'false';
     if (spec.isolation.mode === 'per_run_unix_identity' && !allowSudo) {
-      await report(
-        reportUrl,
-        claim.reportToken,
-        emptyResult(runId, spec.repository, {
-          failure: failure(
-            'ISOLATION_UNSUPPORTED',
-            'preflight',
-            'run requested per_run_unix_identity but the runner was started with ALLOW_SUDO=false',
-          ),
-        }),
+      return refuse(
+        failure(
+          'ISOLATION_UNSUPPORTED',
+          'preflight',
+          'run requested per_run_unix_identity but the runner was started with ALLOW_SUDO=false',
+        ),
+        RUNNER_EXIT.preflightRefused,
       );
-      return RUNNER_EXIT.preflightRefused;
     }
 
     // ── 3. workspace и идентичность рана ───────────────────────────────────────
-    const workspaceRoot = env.WORKSPACE_ROOT ?? process.env['RUNNER_WORKSPACE'] ?? process.cwd();
-    const workspace = path.resolve(workspaceRoot, path.basename(spec.cwd));
-    // Через sudo: прошлый рана мог оставить каталог, принадлежащий своей идентичности,
-    // и обычный `rm` его не удалит.
-    await exec('sudo', ['rm', '-rf', workspace]);
-
-    identity = await createRunIdentity({
-      runId,
-      workspace,
-      allowSudo,
-      sharedBinDir: process.env['RUNNER_TOOL_CACHE'] ?? undefined,
-    });
-    if (spec.isolation.mode === 'per_run_unix_identity' && !identity.enforced) {
-      await report(
-        reportUrl,
-        claim.reportToken,
-        emptyResult(runId, spec.repository, {
-          failure: failure(
-            'ISOLATION_UNSUPPORTED',
-            'preflight',
-            'passwordless sudo is unavailable on this runner, per_run_unix_identity cannot be enforced',
-          ),
-        }),
-      );
-      return RUNNER_EXIT.preflightRefused;
-    }
-    logLine(`identity=${identity.name} uid=${identity.uid} enforced=${identity.enforced}`);
+    const prepared = await prepareWorkspace({ env, spec, runId, allowSudo });
+    if (!prepared.ok) return refuse(prepared.failure, prepared.exit);
+    identity = prepared.value.identity;
+    const { workspace, artifactsToken, logFile } = prepared.value;
     // Алиас без `| null`: ниже identity используется в замыканиях, где narrowing не работает.
-    const identityOfRun = identity;
+    const identityOfRun = prepared.value.identity;
+    let agentConfigPath = '';
 
-    const artifactsToken = env.ARTIFACTS_TOKEN ?? '';
-    if (artifactsToken.length === 0) {
-      await report(
-        reportUrl,
-        claim.reportToken,
-        emptyResult(runId, spec.repository, {
-          failure: failure(
-            'WORKER_INTERNAL',
-            'preflight',
-            'ARTIFACTS_TOKEN is unset: the runner cannot clone repository.fullName nor push artifacts',
-          ),
-        }),
-      );
-      return RUNNER_EXIT.preflightRefused;
-    }
-
-    try {
-      await cloneWorkspace(spec, workspace, artifactsToken, identity);
-    } catch (cause) {
-      const safeSummary = redact(cause instanceof Error ? cause.message : String(cause), artifactsToken);
-      logLine(`clone failed: ${safeSummary}`);
-      await report(
-        reportUrl,
-        claim.reportToken,
-        emptyResult(runId, spec.repository, {
-          failure: failure('WORKER_INTERNAL', 'engine', `clone of ${spec.repository.fullName} failed: ${safeSummary}`),
-        }),
-      );
-      return RUNNER_EXIT.cloneFailed;
-    }
-
-    // Лог сессии живёт ВНЕ workspace. Workspace принадлежит идентичности рана
-    // (755, owner — uid рана), и процесс раннера не может писать в него: `EACCES
-    // ... mkdir .agent`. Кроме того, агент не должен видеть свой же лог в
-    // собственной рабочей папке, а артефакты собираются из объявленных путей.
-    const logFile = path.join(workspaceRoot, 'session-logs', runId, 'session.log');
     await sessionLog.open(
       logFile,
       `# run ${runId} job ${spec.jobId} started ${startedAt.toISOString()}\nagent=${claim.agentBinary}\n`,
@@ -303,41 +463,14 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
 
     // Провайдер агента: без этого opencode ушёл бы в свой дефолтный и упал бы на
     // авторизации уже после старта — как `nonzero_exit`, а не как preflight-отказ.
-    // Пишем под идентичностью: `~/.config/opencode` принадлежит UID рана.
-    let agentConfigPath = '';
+    // Отказ здесь не фатален: без конфига агент упадёт с кодом, и это видно в ответе.
     if (env.AGENT_CONFIG !== 'skip') {
       try {
-        agentConfigPath = await installAgentConfig({
-          identityHome: identityOfRun.home,
+        agentConfigPath = await installAgentConfigUnderIdentity({
+          identity: identityOfRun,
           llmKeyEnvName: claim.llmKeyEnvName,
           mcpServers: spec.mcp?.servers,
-          write: async (target, contents) => {
-            // Конфиг готовим в каталоге раннера, куда есть доступ от обоих UID, и
-            // переносим под идентичность: `~/.config/opencode` принадлежит UID рана,
-            // и прямая запись из процесса раннера падает с EACCES.
-            const staging = path.join(workspaceRoot, 'session-logs', runId, 'opencode.json');
-            await mkdir(path.dirname(staging), { recursive: true });
-            // 0644, а не 0600: файл читает идентичность рана, а пишет раннер. Секрета
-            // в нём нет — `apiKey` это ссылка `{env:ИМЯ}`, значение приходит в
-            // процесс агента из claim'а.
-            await writeFile(staging, contents, { encoding: 'utf8', mode: 0o644 });
-            // `cp` не создаёт промежуточные каталоги, а `~/.config/opencode` у
-            // свежесозданного пользователя отсутствует.
-            await runUnderIdentity(identityOfRun, 'mkdir', ['-p', path.dirname(target)], {
-              PATH: process.env['PATH'] ?? '/usr/bin:/bin',
-              HOME: identityOfRun.home,
-            });
-            await runUnderIdentity(identityOfRun, 'cp', [staging, target], {
-              PATH: process.env['PATH'] ?? '/usr/bin:/bin',
-              HOME: identityOfRun.home,
-            });
-            // chmod — тоже под идентичностью: файл теперь принадлежит UID рана, и
-            // раннер на нём получает EPERM.
-            await runUnderIdentity(identityOfRun, 'chmod', ['600', target], {
-              PATH: process.env['PATH'] ?? '/usr/bin:/bin',
-              HOME: identityOfRun.home,
-            });
-          },
+          stagingDir: path.dirname(logFile),
         });
         const mcpCount = Object.keys(spec.mcp?.servers ?? {}).length;
         logLine(`agent config installed: ${agentConfigPath}${mcpCount > 0 ? ` (mcp servers: ${mcpCount})` : ''}`);
@@ -376,57 +509,17 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
 
     // ── 5. артефакты в репозиторий юзера ───────────────────────────────────────
     const collected = await collectArtifacts(workspace, spec.outputs);
-    let artifactRefs: ArtifactRef[] = [];
-    let repoResult: { fullName: string; branch: string; commit: string } = {
-      fullName: spec.repository.fullName,
-      branch: spec.repository.branch,
-      commit: NULL_SHA,
-    };
-    const repoApi = new GitHubRepoApi({ token: artifactsToken, repo: spec.repository.fullName });
-
-    try {
-      const files: Array<{ path: string; content: Buffer }> = [];
-      for (const artifact of collected.artifacts) {
-        const source = path.resolve(workspace, artifact.path.replace(/^artifacts\//, ''));
-        try {
-          files.push({ path: artifact.path, content: readFileSync(source) });
-        } catch {
-          logLine(`declared output vanished before push: ${artifact.path}`);
-        }
-      }
-      files.push({
-        path: 'artifacts/run-manifest.json',
-        content: buildManifest({
-          runId,
-          jobId: spec.jobId,
-          exitReason: outcome.exitReason,
-          exitCode: outcome.exitCode,
-          durationMs: outcome.durationMs,
-          artifacts: collected.artifacts,
-          missingOutputs: collected.missing,
-          startedAt: startedAt.toISOString(),
-          finishedAt: new Date().toISOString(),
-        }),
-      });
-
-      const pushed = await repoApi.pushFiles({
-        // Ветку задаёт наше API (`repository.branch`) — воркер в неё коммитит, а не
-        // заводит свою. Иначе результат рана оказался бы не там, где его мержат.
-        branch: spec.repository.branch,
-        commitMessage: `opencode-gha-runner: ${runId} (${outcome.exitReason})`,
-        files,
-      });
-      repoResult = { fullName: pushed.fullName, branch: pushed.branch, commit: pushed.commit };
-      artifactRefs = collected.artifacts;
-      sessionLog.append(
-        'stdout',
-        `\npushed ${pushed.pushed.length} file(s) to ${pushed.fullName}@${pushed.branch} @ ${pushed.commit ?? 'no-commit'}\n`,
-      );
-    } catch (cause) {
-      const safeSummary = redact(cause instanceof Error ? cause.message : String(cause), artifactsToken);
-      logLine(`artifact push failed: ${safeSummary}`);
-      outcome.stderr += `\nartifact push failed: ${safeSummary}\n`;
-    }
+    const published = await publishArtifacts({
+      spec,
+      runId,
+      workspace,
+      token: artifactsToken,
+      collected,
+      outcome,
+      startedAt,
+      sessionLog,
+    });
+    if (published.note) outcome.stderr += `\n${published.note}\n`;
 
     // ── 6. лог сессии в GCS ───────────────────────────────────────────────────
     let logUrl = '';
@@ -450,32 +543,16 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
 
     // ── 7. ответ нашему API ────────────────────────────────────────────────────
     const answer = extractAnswer(workspace, outcome.stdout);
-    const failureFor = failureForOutcome(outcome.exitReason, collected.missing);
-
-    const result: LaunchResult = {
+    const result = buildLaunchResult({
       runId,
-      // `started` — движок отработал (в том числе с ненулевым кодом или таймаутом).
-      // `failed` зарезервирован за «воркер не смог запустить», и такие случаи уходят
-      // через emptyResult() до этой точки.
-      status: 'started',
-      // pid процесса агента: агент живёт в GHA-джобе, на другой машине, поэтому здесь
-      // честный null, а не pid процесса, который к нему отношения не имеет.
-      pid: null,
-      exitCode: outcome.exitCode,
-      exitSignal: outcome.exitSignal,
-      exitReason: outcome.exitReason,
-      stdout: outcome.stdout,
-      stderr: outcome.stderr,
-      answer: answer.text,
-      answerSource: answer.source,
-      durationMs: outcome.durationMs,
-      timedOut: outcome.timedOut,
-      outputTruncated: outcome.outputTruncated || logTruncated,
-      artifacts: artifactRefs,
+      outcome,
+      answer,
+      artifacts: published.artifactRefs,
+      repo: published.repo,
       logUrl,
-      repo: repoResult,
-      ...(failureFor ? { failure: failureFor } : {}),
-    };
+      outputTruncated: outcome.outputTruncated || logTruncated,
+      failure: failureForOutcome(outcome.exitReason, collected.missing),
+    });
     await report(reportUrl, claim.reportToken, result);
     return outcome.exitReason === 'completed' ? RUNNER_EXIT.ok : RUNNER_EXIT.agentFailed;
   } catch (cause) {

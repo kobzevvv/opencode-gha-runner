@@ -12,7 +12,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { AGENT_CONFIG_TEMPLATE, installAgentConfig, renderAgentConfig } from '../src/runner/agent-config.js';
-import { collectArtifacts, artifactBranch } from '../src/runner/artifacts.js';
+import { failure } from '../src/contracts.js';
+import { collectArtifacts } from '../src/runner/artifacts.js';
+import { buildLaunchResult } from '../src/runner/main.js';
 import { capOutput, resolveAgentEnv, runAgent } from '../src/runner/exec.js';
 import { buildChildPath, buildLaunchCommand, ensureTraversable, identityName, parentDirs, type Identity } from '../src/runner/identity.js';
 
@@ -337,14 +339,6 @@ test('каталог вместо файла не принимается за в
   await rm(workspace, { recursive: true, force: true });
 });
 
-test('ветка артефактов по умолчанию — agent-run/<runId>', () => {
-  // В контракте ветку задаёт наше API (`repository.branch`); эта функция — страховка
-  // для вызова без ветки, и её форма обязана совпадать с тем, что генерирует API
-  // (`runBranchName()` в external-worker-adapter.ts).
-  const runId = 'run_0fdd061d-14c3-42ea-b182-9393ff3564fa';
-  assert.equal(artifactBranch(runId), `agent-run/${runId}`);
-  assert.ok(!artifactBranch(runId).includes('..'));
-});
 
 // ── конфиг агента ──────────────────────────────────────────────────────────────
 
@@ -496,4 +490,82 @@ test('mcpSecrets доезжают в env агента под своими име
   });
   assert.equal(env['AGENT_MCP_TOKEN'], 'rt_abc123');
   assert.equal(env['LLM_LADDER_TOKEN'], 'llm-key');
+});
+
+// ── форма LaunchResult ─────────────────────────────────────────────────────────
+
+test('LaunchResult содержит ровно те поля, что валидирует наш API', () => {
+  // Кросс-репозиторная приёмка ловила здесь три расхождения (pid, status, commit),
+  // потому что проверялся наш взгляд на контракт. Теперь форма закреплена явно.
+  const result = buildLaunchResult({
+    runId: 'run_1',
+    outcome: {
+      exitCode: 0,
+      exitSignal: null,
+      exitReason: 'completed',
+      stdout: 'ок',
+      stderr: '',
+      durationMs: 100,
+      timedOut: false,
+      outputTruncated: false,
+    },
+    answer: { text: 'готово', source: 'engine_stdout' },
+    artifacts: [],
+    repo: { fullName: 'o/r', branch: 'agent-run/run_1', commit: '0'.repeat(40) },
+    logUrl: 'local://run_1/session.log',
+    outputTruncated: false,
+  });
+
+  assert.deepEqual(Object.keys(result).sort(), [
+    'answer',
+    'answerSource',
+    'artifacts',
+    'durationMs',
+    'exitCode',
+    'exitReason',
+    'exitSignal',
+    'logUrl',
+    'outputTruncated',
+    'pid',
+    'repo',
+    'runId',
+    'status',
+    'stderr',
+    'stdout',
+    'timedOut',
+  ]);
+});
+
+test('status — «движок запустился», а не «чем кончился ран»', () => {
+  const base = {
+    runId: 'run_1',
+    answer: { source: null as null },
+    artifacts: [],
+    repo: { fullName: 'o/r', branch: 'b', commit: '0'.repeat(40) },
+    logUrl: '',
+    outputTruncated: false,
+  };
+  // Ненулевой код и таймаут — это тоже `started`: процесс-то был.
+  for (const exitReason of ['completed', 'nonzero_exit', 'timeout', 'crash'] as const) {
+    const result = buildLaunchResult({
+      ...base,
+      outcome: { exitCode: exitReason === 'completed' ? 0 : 1, exitSignal: null, exitReason, stdout: '', stderr: '', durationMs: 1, timedOut: exitReason === 'timeout', outputTruncated: false },
+    });
+    assert.equal(result.status, 'started', exitReason);
+  }
+});
+
+test('failure появляется только когда он есть', () => {
+  const base = {
+    runId: 'run_1',
+    outcome: { exitCode: 1, exitSignal: null, exitReason: 'nonzero_exit' as const, stdout: '', stderr: '', durationMs: 1, timedOut: false, outputTruncated: false },
+    answer: { source: null as null },
+    artifacts: [],
+    repo: { fullName: 'o/r', branch: 'b', commit: '0'.repeat(40) },
+    logUrl: '',
+    outputTruncated: false,
+  };
+  assert.ok(!('failure' in buildLaunchResult(base)));
+  const withFailure = buildLaunchResult({ ...base, failure: failure('AGENT_NONZERO_EXIT', 'engine', 'упал') });
+  assert.equal(withFailure.failure?.code, 'AGENT_NONZERO_EXIT');
 });

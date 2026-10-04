@@ -15,18 +15,7 @@ import path from 'node:path';
 import type { ArtifactRef, OutputSpec } from '../contracts.js';
 import { isSafeRelativePath } from '../contracts.js';
 
-/**
- * Ветка рана приходит от нашего API в `repository.branch` — воркер её не выдумывает.
- *
- * Раньше здесь было `opencode-gha-runner/<runId>`; контракт изменился: имя ветки знает
- * только API, потому что только оно знает `runId`, и ветка — единица результата, которую
- * API мержит одним действием. Функция осталась как страховка для старых вызовов без ветки.
- */
-export const ARTIFACT_BRANCH_PREFIX = 'agent-run';
 
-export function artifactBranch(runId: string): string {
-  return `${ARTIFACT_BRANCH_PREFIX}/${runId}`;
-}
 
 export interface CollectResult {
   artifacts: ArtifactRef[];

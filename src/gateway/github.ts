@@ -83,28 +83,42 @@ export class GitHubClient {
    * поэтому `run_id` берётся вторым вызовом — по нему потом работает отмена.
    */
   async dispatchWorkflow(input: DispatchInput): Promise<DispatchResult> {
-    const before = await this.findLatestRunForCommit();
-
-    const payload: Record<string, unknown> = {
-      ref: this.ref,
-      inputs: {
-        run_id: input.runId,
-        claim_token: input.claimToken,
-      },
-    };
-    if (this.ref === undefined) delete payload['ref'];
+    const branch = await this.resolveRef();
+    const before = await this.headSha(branch);
 
     const { status, data } = await this.request<{ message?: string }>(
       'POST',
       `/repos/${this.repo}/actions/workflows/${this.workflow}/dispatches`,
-      payload,
+      {
+        // `ref` обязателен в REST API, хотя в UI выбирается неявно. Без него GitHub
+        // отвечает 422 «"ref" wasn't supplied», поэтому ветка резолвится всегда —
+        // либо из конфига, либо из default branch репозитория.
+        ref: branch,
+        inputs: {
+          run_id: input.runId,
+          claim_token: input.claimToken,
+        },
+      },
     );
     if (status !== 204) {
       throw new Error(`workflow_dispatch failed with ${status}: ${data?.message ?? 'unknown error'}`);
     }
 
-    const runId = await this.waitForRunId(before);
+    const runId = await this.waitForRunId(branch, before);
     return { runId, htmlUrl: `https://github.com/${this.repo}/actions/runs/${runId}` };
+  }
+
+  private cachedRef: string | null = null;
+
+  /** Ветка для диспатча: из конфига, иначе default branch репозитория. */
+  private async resolveRef(): Promise<string> {
+    if (this.ref !== undefined && this.ref.length > 0) return this.ref;
+    if (this.cachedRef !== null) return this.cachedRef;
+    const repo = await this.request<{ default_branch?: string }>('GET', `/repos/${this.repo}`);
+    const branch = repo.data.default_branch;
+    if (!branch) throw new Error(`could not resolve the default branch of ${this.repo}`);
+    this.cachedRef = branch;
+    return branch;
   }
 
   /** Список прогонов этого workflow, от свежих к старым. */
@@ -117,9 +131,7 @@ export class GitHubClient {
     return data.workflow_runs ?? [];
   }
 
-  private async headSha(): Promise<string> {
-    const { data } = await this.request<{ default_branch?: string }>('GET', `/repos/${this.repo}`);
-    const branch = data.default_branch ?? 'main';
+  private async headSha(branch: string): Promise<string> {
     const ref = await this.request<{ object?: { sha?: string } }>(
       'GET',
       `/repos/${this.repo}/git/ref/heads/${branch}`,
@@ -127,27 +139,22 @@ export class GitHubClient {
     return ref.data.object?.sha ?? '';
   }
 
-  private async findLatestRunForCommit(): Promise<string> {
-    try {
-      return await this.headSha();
-    } catch {
-      return '';
-    }
-  }
-
   /**
-   * `workflow_dispatch` возвращает `204` без тела, поэтому новый прогон ищем сами.
-   * Берём первый прогон workflow_dispatch, у которого `head_sha` совпадает с текущим
-   * коммитом ветки и который ещё не появился до диспатча.
+   * `workflow_dispatch` отвечает `204` без тела, поэтому `run_id` приходится искать
+   * вторым вызовом — без него нечем отменять рана.
+   *
+   * Берём первый прогон со статусом `queued`/`in_progress`: только что запущенный рана
+   * всегда в этих статусах, а завершённые — `completed`. Если таких нет (диспатч был
+   * секунду назад и статус уже сменился), сходим во второй раз и берём самый свежий.
    */
-  private async waitForRunId(beforeSha: string, attempts = 6): Promise<number> {
+  private async waitForRunId(branch: string, beforeSha: string, attempts = 8): Promise<number> {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       const runs = await this.listWorkflowRuns();
-      const match = runs.find(
-        (run) => run.status === 'queued' || run.status === 'in_progress' || run.head_sha === beforeSha,
-      );
-      if (match) return match.id;
-      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+      const fresh = runs.find((run) => run.status === 'queued' || run.status === 'in_progress');
+      if (fresh) return fresh.id;
+      const sameCommit = runs.find((run) => run.head_sha === beforeSha);
+      if (sameCommit && attempt >= 2) return sameCommit.id;
+      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
     }
     const runs = await this.listWorkflowRuns();
     if (runs.length > 0) return runs[0]!.id;

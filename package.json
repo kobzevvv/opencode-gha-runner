@@ -10,8 +10,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "dev": "npm run build && node dist/gateway/dev.js",
-    "test": "npm run build && node --test \"dist/test/*.test.js\"",
+    "dev": "npm run build && node dist/src/gateway/dev.js",
+    "test": "npm run build && node --test dist/test/*.test.js",
     "smoke": "npm run build && node dist/scripts/smoke.js",
     "deploy": "wrangler deploy",
     "deploy:dry": "wrangler deploy --dry-run",

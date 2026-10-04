@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createGateway, type GatewayConfig } from '../src/gateway/app.js';
-import type { DispatchResult, GitHubClient } from '../src/gateway/github.js';
+import { GitHubClient, type DispatchResult } from '../src/gateway/github.js';
 import { MemoryRunStore } from '../src/gateway/store.js';
 import { validLaunchRequest } from './contracts.test.js';
 
@@ -360,4 +360,87 @@ test('ответ claim помечен no-store: в нём лежит ключ LL
     }),
   );
   assert.equal(response.headers.get('cache-control'), 'no-store');
+});
+
+// ── клиент GitHub: самые частые причины 4xx/422 ───────────────────────────────
+
+test('workflow_dispatch всегда отправляет ref, иначе GitHub отвечает 422', async () => {
+  const seen: Array<{ url: string; body: unknown; method: string }> = [];
+  const fakeFetch = (async (url: string | URL, init?: RequestInit) => {
+    const href = String(url);
+    seen.push({ url: href, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    if (href.endsWith('/repos/vovalikessmoothy-png/opencode-gha-runner')) {
+      return new Response(JSON.stringify({ default_branch: 'trunk' }), { status: 200 });
+    }
+    if (href.includes('/dispatches')) return new Response(null, { status: 204 });
+    if (href.includes('/git/ref/heads/trunk')) {
+      return new Response(JSON.stringify({ object: { sha: 'abc123' } }), { status: 200 });
+    }
+    if (href.includes('/actions/workflows/')) {
+      return new Response(
+        JSON.stringify({ workflow_runs: [{ id: 555, head_sha: 'abc123', status: 'queued' }] }),
+        { status: 200 },
+      );
+    }
+    return new Response('{}', { status: 404 });
+  }) as unknown as typeof fetch;
+
+  const client = new GitHubClient({
+    token: 't',
+    repo: 'vovalikessmoothy-png/opencode-gha-runner',
+    workflow: 'run-agent.yml',
+    fetchImpl: fakeFetch,
+  });
+  const result = await client.dispatchWorkflow({ runId: 'run-1', claimToken: 'claim-1' });
+  assert.equal(result.runId, 555);
+
+  const dispatch = seen.find((call) => call.url.includes('/dispatches'));
+  assert.ok(dispatch, 'dispatches должен быть вызван');
+  const body = dispatch!.body as { ref: string; inputs: Record<string, string> };
+  assert.equal(body.ref, 'trunk', 'ref обязан резолвиться из default branch, а не выбрасываться');
+  assert.deepEqual(Object.keys(body.inputs).sort(), ['claim_token', 'run_id']);
+});
+
+test('явно заданный ref не перебивается веткой репозитория', async () => {
+  const bodies: unknown[] = [];
+  const fakeFetch = (async (url: string | URL, init?: RequestInit) => {
+    const href = String(url);
+    if (href.includes('/dispatches')) {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(null, { status: 204 });
+    }
+    if (href.includes('/actions/workflows/')) {
+      return new Response(JSON.stringify({ workflow_runs: [{ id: 7, head_sha: 'x', status: 'in_progress' }] }), {
+        status: 200,
+      });
+    }
+    return new Response(JSON.stringify({ object: { sha: 'x' } }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const client = new GitHubClient({
+    token: 't',
+    repo: 'o/r',
+    workflow: 'run-agent.yml',
+    ref: 'release-1',
+    fetchImpl: fakeFetch,
+  });
+  await client.dispatchWorkflow({ runId: 'run-1', claimToken: 'claim-1' });
+  assert.equal((bodies[0] as { ref: string }).ref, 'release-1');
+});
+
+test('ошибка диспатча не теряет код ответа', async () => {
+  const fakeFetch = (async (url: string | URL) => {
+    if (String(url).includes('/dispatches')) {
+      return new Response(JSON.stringify({ message: 'Workflow does not have workflow_dispatch trigger' }), {
+        status: 422,
+      });
+    }
+    return new Response(JSON.stringify({ default_branch: 'main' }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const client = new GitHubClient({ token: 't', repo: 'o/r', workflow: 'nope.yml', fetchImpl: fakeFetch });
+  await assert.rejects(
+    () => client.dispatchWorkflow({ runId: 'run-1', claimToken: 'c' }),
+    /workflow_dispatch failed with 422.*workflow_dispatch trigger/s,
+  );
 });

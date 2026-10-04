@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "runId": "run_mcp_1791132720",
+  "jobId": "job-e2e-1",
+  "exitReason": "completed",
+  "exitCode": 0,
+  "durationMs": 8443,
+  "artifacts": [],
+  "missingOutputs": [
+    "report.md"
+  ],
+  "startedAt": "2026-10-04T16:52:27.852Z",
+  "finishedAt": "2026-10-04T16:52:56.896Z"
+}

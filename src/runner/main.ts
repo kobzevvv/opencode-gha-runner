@@ -25,7 +25,7 @@ import { appendFile, mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { RESULT_PATH, type ClaimPayload } from '../claim.js';
+import { REPORT_PATH, type ClaimPayload } from '../claim.js';
 import {
   clampTimeout,
   failure,
@@ -109,7 +109,11 @@ async function report(url: string, reportToken: string, result: LaunchResult): P
   logLine(`result reported: exitReason=${result.exitReason} artifacts=${result.artifacts.length}`);
 }
 
-function emptyResult(runId: string, repoFullName: string, partial: Partial<LaunchResult> = {}): LaunchResult {
+function emptyResult(
+  runId: string,
+  repo: { fullName: string; branch: string },
+  partial: Partial<LaunchResult> = {},
+): LaunchResult {
   return {
     runId,
     status: 'failed',
@@ -124,7 +128,7 @@ function emptyResult(runId: string, repoFullName: string, partial: Partial<Launc
     outputTruncated: false,
     artifacts: [],
     logUrl: '',
-    repo: { fullName: repoFullName, commit: null },
+    repo: { fullName: repo.fullName, branch: repo.branch, commit: null },
     ...partial,
   };
 }
@@ -189,7 +193,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     }
     claim = (await claimResponse.json()) as ClaimPayload;
     const spec = claim.spec;
-    const reportUrl = `${gatewayUrl}${RESULT_PATH(runId)}`;
+    const reportUrl = `${gatewayUrl}${REPORT_PATH(runId)}`;
     const mcpSecrets = spec.mcpSecrets ?? {};
     const secrets = [claim.llmKey, env.ARTIFACTS_TOKEN, ...Object.values(mcpSecrets)];
 
@@ -200,7 +204,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       await report(
         reportUrl,
         claim.reportToken,
-        emptyResult(runId, spec.repository.fullName, {
+        emptyResult(runId, spec.repository, {
           failure: failure('AGENT_BINARY_MISSING', 'preflight', `agent binary "${claim.agentBinary}" not found`),
         }),
       );
@@ -212,7 +216,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       await report(
         reportUrl,
         claim.reportToken,
-        emptyResult(runId, spec.repository.fullName, {
+        emptyResult(runId, spec.repository, {
           failure: failure(
             'ISOLATION_UNSUPPORTED',
             'preflight',
@@ -240,7 +244,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       await report(
         reportUrl,
         claim.reportToken,
-        emptyResult(runId, spec.repository.fullName, {
+        emptyResult(runId, spec.repository, {
           failure: failure(
             'ISOLATION_UNSUPPORTED',
             'preflight',
@@ -259,7 +263,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       await report(
         reportUrl,
         claim.reportToken,
-        emptyResult(runId, spec.repository.fullName, {
+        emptyResult(runId, spec.repository, {
           failure: failure(
             'WORKER_INTERNAL',
             'preflight',
@@ -278,7 +282,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       await report(
         reportUrl,
         claim.reportToken,
-        emptyResult(runId, spec.repository.fullName, {
+        emptyResult(runId, spec.repository, {
           failure: failure('WORKER_INTERNAL', 'engine', `clone of ${spec.repository.fullName} failed: ${safeSummary}`),
         }),
       );
@@ -371,7 +375,11 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     // ── 5. артефакты в репозиторий юзера ───────────────────────────────────────
     const collected = await collectArtifacts(workspace, spec.outputs);
     let artifactRefs: ArtifactRef[] = [];
-    let repoResult: { fullName: string; commit: string | null } = { fullName: spec.repository.fullName, commit: null };
+    let repoResult: { fullName: string; branch: string; commit: string | null } = {
+      fullName: spec.repository.fullName,
+      branch: spec.repository.branch,
+      commit: null,
+    };
     const repoApi = new GitHubRepoApi({ token: artifactsToken, repo: spec.repository.fullName });
 
     try {
@@ -400,11 +408,13 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       });
 
       const pushed = await repoApi.pushFiles({
-        branch: artifactBranch(runId),
+        // Ветку задаёт наше API (`repository.branch`) — воркер в неё коммитит, а не
+        // заводит свою. Иначе результат рана оказался бы не там, где его мержат.
+        branch: spec.repository.branch,
         commitMessage: `opencode-gha-runner: ${runId} (${outcome.exitReason})`,
         files,
       });
-      repoResult = { fullName: pushed.fullName, commit: pushed.commit };
+      repoResult = { fullName: pushed.fullName, branch: pushed.branch, commit: pushed.commit };
       artifactRefs = collected.artifacts;
       sessionLog.append(
         'stdout',
@@ -465,9 +475,9 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     logLine(`runner crashed: ${safeSummary}`);
     if (claim) {
       await report(
-        `${gatewayUrl}${RESULT_PATH(runId)}`,
+        `${gatewayUrl}${REPORT_PATH(runId)}`,
         claim.reportToken,
-        emptyResult(runId, claim.spec.repository.fullName, {
+        emptyResult(runId, claim.spec.repository, {
           failure: failure('WORKER_INTERNAL', 'finalization', safeSummary),
           stderr: safeSummary,
         }),

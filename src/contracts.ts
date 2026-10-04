@@ -35,8 +35,10 @@ export interface EngineSpec {
 
 export interface OutputSpec {
   path: string;
-  name: string;
-  mime: string;
+  /** Опционально: если не задано, воркер выводит имя из `path`. */
+  name?: string;
+  /** Опционально: если не задано, воркер определяет MIME по расширению. */
+  mime?: string;
 }
 
 export interface LaunchLimits {
@@ -96,7 +98,18 @@ export interface LaunchRequest {
   envAllowlist: string[];
   env: Record<string, string>;
   limits: LaunchLimits;
-  repository: { fullName: string };
+  /**
+   * `branch` задаёт наше API, а не воркер: только API знает `runId`, поэтому имя ветки
+   * уникально, трассируемо до рана и не может столкнуться с ветками самого юзера. Ветка —
+   * единица результата, и воркер обязан коммитить именно в неё, а не выдумывать свою.
+   */
+  repository: { fullName: string; branch: string };
+  /**
+   * Куда воркер отдаёт `LaunchResult` этого рана: `POST {resultUrl}` с тем же общим секретом
+   * в `Authorization`, которым аутентифицировали launch. Адрес приходит в запросе, поэтому
+   * воркеру не нужно знать, где живёт наш API.
+   */
+  resultUrl: string;
   isolation: { mode: IsolationMode };
   outputs?: OutputSpec[];
   /** Опционально: только если наш API сам кладёт ключ в `envAllowlist`. */
@@ -160,7 +173,8 @@ export interface LaunchResult {
   outputTruncated: boolean;
   artifacts: ArtifactRef[];
   logUrl: string;
-  repo: { fullName: string; commit: string | null };
+  /** Куда лёг результат: ветка пришла от нашего API, commit — HEAD этой ветки. */
+  repo: { fullName: string; branch: string; commit: string | null; baseRef?: string };
   failure?: Failure;
 }
 
@@ -212,6 +226,34 @@ export function failure(
 
 export type RunPhase = 'queued' | 'dispatched' | 'claimed' | 'running' | 'done';
 
+/**
+ * Статус рана в терминах контракта (`GET /v1/runs/{runId}/status`).
+ *
+ * `unknown` — исход установить нельзя (обрыв связи, смерть воркера без финализации).
+ * Это **не** `failed`: задача не теряется, авто-rerun не происходит, следующий шаг —
+ * reconcile существующего запуска.
+ */
+export type WorkerRunStatus = 'accepted' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
+
+/**
+ * Квитанция запуска. `POST /v1/launch` отвечает ею сразу: воркер принял ран и ушёл
+ * работать, соединение закрывается. Финальный результат читается отдельно — по
+ * `statusUrl` и `resultUrl`.
+ */
+export interface LaunchReceipt {
+  runId: string;
+  operationId: string;
+  status: 'accepted';
+  statusUrl: string;
+  resultUrl: string;
+}
+
+export interface WorkerStatusView {
+  runId: string;
+  status: WorkerRunStatus;
+  updatedAt: string;
+}
+
 export interface RunStatusResponse {
   runId: string;
   phase: RunPhase;
@@ -261,6 +303,15 @@ export function isSafeRelativePath(value: unknown): value is string {
     .some((segment) => segment === '' || segment === '.' || segment === '..');
 }
 
+/** Ветка git: без пробелов, `..`, ведущих `-`/`/` и управляющих символов. */
+export function isSafeBranchName(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 200) return false;
+  if (/[\x00-\x20~^:?*\[\\]/.test(value)) return false;
+  if (value.startsWith('-') || value.startsWith('/') || value.endsWith('/') || value.endsWith('.')) return false;
+  if (value.includes('..') || value.includes('//') || value.includes('@{')) return false;
+  return true;
+}
+
 export function isSafeWorktreePath(value: unknown): value is string {
   return (
     typeof value === 'string' &&
@@ -306,7 +357,12 @@ export function validateLaunchRequest(input: unknown): LaunchRequest {
     issues.push('engine: expected an object');
   } else {
     const engine = req['engine'];
-    if (engine['name'] !== ENGINE_NAME) issues.push(`engine.name: expected "${ENGINE_NAME}"`);
+    // Имя движка — это адрес воркера в нашем API, а не его внутренняя деталь: одно и то
+    // же развёртывание регистрируется под разными именами (`dynamic-ip-azure-agent-run`,
+    // `github-actions-agent-run`). Валидируем форму, а не конкретное значение.
+    if (typeof engine['name'] !== 'string' || engine['name'].length === 0 || engine['name'].length > 100) {
+      issues.push('engine.name: expected a non-empty string');
+    }
     if (engine['adapterVersion'] !== ENGINE_ADAPTER_VERSION) {
       issues.push(`engine.adapterVersion: expected "${ENGINE_ADAPTER_VERSION}"`);
     }
@@ -362,8 +418,23 @@ export function validateLaunchRequest(input: unknown): LaunchRequest {
     }
   }
 
-  if (!isPlainObject(req['repository']) || !REPO_FULL_NAME.test(String(req['repository']['fullName']))) {
-    issues.push('repository.fullName: expected "owner/name"');
+  if (!isPlainObject(req['repository'])) {
+    issues.push('repository: expected an object');
+  } else {
+    if (!REPO_FULL_NAME.test(String(req['repository']['fullName']))) {
+      issues.push('repository.fullName: expected "owner/name"');
+    }
+    // Ветку задаёт наше API: только оно знает runId, поэтому имя уникально и не
+    // сталкивается с ветками юзера. Воркер обязан коммитить именно сюда.
+    if (!isSafeBranchName(req['repository']['branch'])) {
+      issues.push('repository.branch: expected a safe git branch name');
+    }
+  }
+
+  // Адрес возврата результата. Без него воркеру некуда отдать LaunchResult, и наш API
+  // остался бы опрашивать воркер до watchdog'а.
+  if (typeof req['resultUrl'] !== 'string' || !/^https?:\/\//.test(req['resultUrl'])) {
+    issues.push('resultUrl: expected an http(s) URL');
   }
 
   if (!isPlainObject(req['isolation'])) {
@@ -384,10 +455,12 @@ export function validateLaunchRequest(input: unknown): LaunchRequest {
           return;
         }
         if (!isSafeRelativePath(output['path'])) issues.push(`outputs[${i}].path: expected a safe relative path`);
-        if (typeof output['name'] !== 'string' || output['name'].length === 0 || output['name'].length > 255) {
+        // name/mime опциональны: контракт разрешает их опустить, и воркер выводит имя
+        // из path, а MIME — по расширению.
+        if (output['name'] !== undefined && (typeof output['name'] !== 'string' || output['name'].length === 0 || output['name'].length > 255)) {
           issues.push(`outputs[${i}].name: expected 1..255 chars`);
         }
-        if (typeof output['mime'] !== 'string' || output['mime'].length === 0 || output['mime'].length > 255) {
+        if (output['mime'] !== undefined && (typeof output['mime'] !== 'string' || output['mime'].length === 0 || output['mime'].length > 255)) {
           issues.push(`outputs[${i}].mime: expected 1..255 chars`);
         }
       });

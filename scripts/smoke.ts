@@ -1,6 +1,7 @@
 /**
- * Приёмка шлюза без сети и без GitHub: поднимает шлюз локально, прогоняет полный цикл
- * launch → poll → claim → result и проверяет, что контракт соблюдён на каждом шаге.
+ * Приёмка шлюза без сети и без GitHub: поднимает шлюз локально и прогоняет полный
+ * асинхронный цикл контракта — launch → receipt → status → claim → report → result →
+ * callback в наш API — проверяя, что контракт соблюдён на каждом шаге.
  *
  * Запуск: `npm run smoke`. Ничего не деплоит и не дёргает GitHub.
  */
@@ -16,6 +17,8 @@ const runId = 'run_smoke_0001';
 
 const dispatched: Array<{ runId: string; claimToken: string }> = [];
 const cancelled: number[] = [];
+/** Что шлюз переслал нашему API на `resultUrl` — проверяем сам callback. */
+const delivered: Array<{ url: string; auth: string | null; body: unknown }> = [];
 
 const github = {
   dispatchWorkflow: async (input: { runId: string; claimToken: string }) => {
@@ -43,6 +46,15 @@ const server = await startNodeServer({
   },
   store,
   github: github as never,
+  // Callback в наш API перехватываем: приёмка не должна стучаться в интернет.
+  fetchImpl: (async (url: string | URL, init?: RequestInit) => {
+    delivered.push({
+      url: String(url),
+      auth: (init?.headers as Record<string, string> | undefined)?.['authorization'] ?? null,
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+    });
+    return new Response('{}', { status: 200 });
+  }) as unknown as typeof fetch,
   port: PORT,
   log: (message, fields) => console.log(`  [gateway] ${message}`, JSON.stringify(fields ?? {})),
 });
@@ -65,23 +77,28 @@ const spec: LaunchRequest = {
   envAllowlist: ['PATH', 'HOME', 'LLM_LADDER_TOKEN'],
   env: { PATH: '/usr/bin', HOME: '/home/runner' },
   limits: { timeoutMs: 300_000, maxOutputBytes: 1_048_576, maxLogBytes: 1_048_576 },
-  repository: { fullName: 'vovalikessmoothy-png/opencode-gha-runner' },
+  repository: { fullName: 'vovalikessmoothy-png/opencode-gha-runner', branch: `agent-run/${runId}` },
+  resultUrl: 'https://api.example/v1/worker/launches/run_smoke_0001/result',
   isolation: { mode: 'per_run_unix_identity' },
   outputs: [{ path: 'report.md', name: 'report.md', mime: 'text/markdown' }],
   credentials: { llmKey: 'smoke-llm-key-value' },
 };
 
-console.log('1. POST /v1/launch');
+console.log('1. POST /v1/launch — квитанция, а не результат');
 const launchResponse = await fetch(`${base}/v1/launch`, {
   method: 'POST',
   headers: { ...worker, 'content-type': 'application/json' },
   body: JSON.stringify(spec),
 });
 assert.equal(launchResponse.status, 202, 'launch обязан отвечать 202, а не ждать агента');
-const launchBody = (await launchResponse.json()) as { status: string; pollUrl: string; githubRunId: number };
-assert.equal(launchBody.status, 'started');
-assert.equal(launchBody.githubRunId, 999);
-console.log(`   → ${launchBody.status}, pollUrl=${launchBody.pollUrl}`);
+const launchBody = (await launchResponse.json()) as {
+  runId: string; operationId: string; status: string; statusUrl: string; resultUrl: string;
+};
+assert.equal(launchBody.status, 'accepted');
+assert.equal(launchBody.runId, runId);
+assert.equal(launchBody.statusUrl, `${base}/v1/runs/${runId}/status`);
+assert.equal(launchBody.resultUrl, `${base}/v1/runs/${runId}/result`);
+console.log(`   → accepted, statusUrl=${launchBody.statusUrl}`);
 
 console.log('2. В dispatch уехал только claim-токен');
 assert.equal(dispatched.length, 1);
@@ -91,13 +108,18 @@ assert.ok(!dispatchPayload.includes('Напиши отчёт'), 'промпт н
 assert.ok(!dispatchPayload.includes(GITHUB_TOKEN), 'токен GitHub не должен уезжать в inputs');
 console.log(`   → ${dispatchPayload}`);
 
-console.log('3. GET /v1/runs/{runId} до готовности — 202 без результата');
-const pending = await fetch(`${base}/v1/runs/${runId}`, { headers: worker });
-assert.equal(pending.status, 202);
-assert.equal(((await pending.json()) as { result: unknown }).result, null);
-console.log('   → 202, result=null');
+console.log('3. GET /status до claim — accepted');
+const acceptedStatus = await fetch(`${base}/v1/runs/${runId}/status`, { headers: worker });
+assert.equal(acceptedStatus.status, 200);
+assert.equal(((await acceptedStatus.json()) as { status: string }).status, 'accepted');
+console.log('   → accepted');
 
-console.log('4. POST /v1/claim — джоба забирает spec и ключ');
+console.log('4. GET /result до готовности — 409, а не пустое тело');
+const notReady = await fetch(`${base}/v1/runs/${runId}/result`, { headers: worker });
+assert.equal(notReady.status, 409);
+console.log('   → 409 not_ready');
+
+console.log('5. POST /v1/claim — джоба забирает spec и ключ');
 const claimResponse = await fetch(`${base}/v1/claim`, {
   method: 'POST',
   headers: { authorization: `Bearer ${dispatched[0]!.claimToken}`, 'content-type': 'application/json' },
@@ -106,18 +128,19 @@ const claimResponse = await fetch(`${base}/v1/claim`, {
 assert.equal(claimResponse.status, 200);
 assert.equal(claimResponse.headers.get('cache-control'), 'no-store');
 const claim = (await claimResponse.json()) as {
-  llmKey: string;
-  llmKeyEnvName: string;
-  reportToken: string;
-  reportUrl: string;
-  spec: LaunchRequest;
+  llmKey: string; llmKeyEnvName: string; reportToken: string; reportUrl: string; spec: LaunchRequest;
 };
 assert.equal(claim.llmKey, 'smoke-llm-key-value');
 assert.equal(claim.llmKeyEnvName, 'LLM_LADDER_TOKEN');
-assert.equal(claim.spec.input.inlinePrompt, 'Напиши отчёт в report.md');
+assert.equal(claim.reportUrl, `${base}/v1/runs/${runId}/report`, 'отчёт джобы идёт на внутренний маршрут');
 console.log(`   → llmKey получен, reportToken=${claim.reportToken.slice(0, 8)}…`);
 
-console.log('5. Повторный claim того же токена — 409');
+console.log('6. GET /status после claim — running');
+const runningStatus = await fetch(`${base}/v1/runs/${runId}/status`, { headers: worker });
+assert.equal(((await runningStatus.json()) as { status: string }).status, 'running');
+console.log('   → running');
+
+console.log('7. Повторный claim того же токена — 409');
 const replay = await fetch(`${base}/v1/claim`, {
   method: 'POST',
   headers: { authorization: `Bearer ${dispatched[0]!.claimToken}`, 'content-type': 'application/json' },
@@ -126,7 +149,7 @@ const replay = await fetch(`${base}/v1/claim`, {
 assert.equal(replay.status, 409);
 console.log('   → 409 claim_invalid');
 
-console.log('6. POST /v1/runs/{runId}/result — джоба кладёт результат');
+console.log('8. POST /v1/runs/{runId}/report — джоба кладёт результат');
 const resultPayload = {
   runId: 'подделанный',
   status: 'succeeded',
@@ -140,19 +163,11 @@ const resultPayload = {
   durationMs: 45_230,
   timedOut: false,
   outputTruncated: false,
-  artifacts: [
-    {
-      path: 'artifacts/report.md',
-      name: 'report.md',
-      mime: 'text/markdown',
-      sha256: 'a'.repeat(64),
-      size: 1234,
-    },
-  ],
+  artifacts: [{ path: 'artifacts/report.md', name: 'report.md', mime: 'text/markdown', sha256: 'a'.repeat(64), size: 1234 }],
   logUrl: 'https://storage.googleapis.com/bucket/run_smoke_0001/session.log',
-  repo: { fullName: 'vovalikessmoothy-png/opencode-gha-runner', commit: 'abc123' },
+  repo: { fullName: 'vovalikessmoothy-png/opencode-gha-runner', branch: `agent-run/${runId}`, commit: 'abc123' },
 };
-const resultResponse = await fetch(`${base}/v1/runs/${runId}/result`, {
+const resultResponse = await fetch(`${base}/v1/runs/${runId}/report`, {
   method: 'POST',
   headers: { authorization: `Bearer ${claim.reportToken}`, 'content-type': 'application/json' },
   body: JSON.stringify(resultPayload),
@@ -160,40 +175,50 @@ const resultResponse = await fetch(`${base}/v1/runs/${runId}/result`, {
 assert.equal(resultResponse.status, 200);
 console.log('   → 200 accepted');
 
-console.log('7. GET /v1/runs/{runId} — 200 с результатом, runId из пути');
-const done = await fetch(`${base}/v1/runs/${runId}`, { headers: worker });
-assert.equal(done.status, 200);
-const doneBody = (await done.json()) as { result: { runId: string; exitReason: string; artifacts: unknown[] } };
-assert.equal(doneBody.result.runId, runId, 'runId в теле игнорируется');
-assert.equal(doneBody.result.exitReason, 'completed');
-assert.equal(doneBody.result.artifacts.length, 1);
-console.log(`   → exitReason=${doneBody.result.exitReason}, artifacts=${doneBody.result.artifacts.length}`);
+console.log('9. Результат переслан нашему API на resultUrl с общим секретом');
+assert.equal(delivered.length, 1, 'без пересылки наш API ждал бы watchdog');
+assert.equal(delivered[0]!.url, spec.resultUrl);
+assert.equal(delivered[0]!.auth, `Bearer ${WORKER_TOKEN}`);
+console.log(`   → POST ${delivered[0]!.url} (Bearer …)`);
 
-console.log('8. Ключ LLM вычищен из хранилища');
+console.log('10. GET /result — 200 с результатом, runId из пути');
+const done = await fetch(`${base}/v1/runs/${runId}/result`, { headers: worker });
+assert.equal(done.status, 200);
+const doneBody = (await done.json()) as { runId: string; exitReason: string; artifacts: unknown[] };
+assert.equal(doneBody.runId, runId, 'runId в теле игнорируется');
+assert.equal(doneBody.exitReason, 'completed');
+assert.equal(doneBody.artifacts.length, 1);
+console.log(`   → exitReason=${doneBody.exitReason}, artifacts=${doneBody.artifacts.length}`);
+
+console.log('11. GET /status — succeeded');
+const succeeded = (await (await fetch(`${base}/v1/runs/${runId}/status`, { headers: worker })).json()) as { status: string };
+assert.equal(succeeded.status, 'succeeded');
+console.log('   → succeeded');
+
+console.log('12. Ключ LLM вычищен из хранилища');
 const stored = await store.get(runId);
 assert.ok(stored);
 assert.ok(!JSON.stringify(stored).includes('smoke-llm-key-value'), 'ключ не должен оставаться в ране');
 console.log('   → ключа в хранилище нет');
 
-console.log('9. Отмена завершённого рана идемпотентна и не трогает GitHub');
-const cancelDone = await fetch(`${base}/v1/runs/${runId}/cancel`, { method: 'POST', headers: worker });
-assert.equal(cancelDone.status, 200);
-assert.equal(((await cancelDone.json()) as { status: string }).status, 'finished');
-assert.deepEqual(cancelled, [], 'у завершённого рана нечего отменять');
-
-console.log('10. POST /v1/runs/{runId}/cancel на живом ране гасит GitHub-прогон');
-const liveRunId = 'run_smoke_0002';
-await fetch(`${base}/v1/launch`, {
+console.log('13. Дедупликация: повтор launch с тем же operationId — та же квитанция');
+const replayLaunch = await fetch(`${base}/v1/launch`, {
   method: 'POST',
   headers: { ...worker, 'content-type': 'application/json' },
-  body: JSON.stringify({ ...spec, runId: liveRunId }),
+  body: JSON.stringify({ ...spec, runId: 'run_smoke_duplicate' }),
 });
-const cancelResponse = await fetch(`${base}/v1/runs/${liveRunId}/cancel`, { method: 'POST', headers: worker });
-assert.equal(cancelResponse.status, 200);
-assert.deepEqual(cancelled, [999]);
-console.log('   → cancelled');
+assert.equal(replayLaunch.status, 202);
+assert.equal(((await replayLaunch.json()) as { runId: string }).runId, runId, 'повтор обязан вернуть тот же runId');
+assert.equal(dispatched.length, 1, 'второй GHA-прогон — ровно тот дефект, который контракт исключает');
+console.log('   → тот же runId, второго диспатча нет');
 
-console.log('11. Отказ без авторизации — 401');
+console.log('14. cancel неизвестного рана — unknown_run');
+const unknownCancel = await fetch(`${base}/v1/runs/run_нет/cancel`, { method: 'POST', headers: worker });
+assert.equal(unknownCancel.status, 200);
+assert.equal(((await unknownCancel.json()) as { status: string }).status, 'unknown_run');
+console.log('   → unknown_run');
+
+console.log('15. Отказ без авторизации — 401');
 const unauthorized = await fetch(`${base}/v1/launch`, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },

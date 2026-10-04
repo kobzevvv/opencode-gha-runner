@@ -31,7 +31,8 @@ export function validLaunchRequest(overrides: Partial<LaunchRequest> = {}): Reco
     envAllowlist: ['PATH', 'HOME'],
     env: { PATH: '/usr/bin', HOME: '/home/runner' },
     limits: { timeoutMs: 300_000, maxOutputBytes: 1_048_576, maxLogBytes: 1_048_576 },
-    repository: { fullName: 'owner/name' },
+    repository: { fullName: 'owner/name', branch: `agent-run/${'run_0fdd061d-14c3-42ea-b182-9393ff3564fa'}` },
+    resultUrl: 'https://api.example/v1/worker/launches/run_0fdd061d/result',
     isolation: { mode: 'per_run_unix_identity' },
     outputs: [{ path: 'report.md', name: 'report.md', mime: 'text/markdown' }],
     ...overrides,
@@ -44,11 +45,38 @@ test('принимает корректный LaunchRequest', () => {
   assert.equal(spec.limits.timeoutMs, 300_000);
 });
 
-test('требует ровно тот движок, который зарегистрирован в нашем API', () => {
+test('имя движка — адрес воркера в нашем API, а не его внутренняя деталь', () => {
+  // Одно и то же развёртывание регистрируется под разными именами
+  // (`dynamic-ip-azure-agent-run`, `github-actions-agent-run`), поэтому воркер не должен
+  // отказывать по имени — только проверять форму.
+  for (const name of ['dynamic-ip-azure-agent-run', 'github-actions-agent-run', 'opencode']) {
+    assert.doesNotThrow(() => validateLaunchRequest(validLaunchRequest({ engine: { name, adapterVersion: '1' } } as never)), name);
+  }
   assert.throws(
-    () => validateLaunchRequest(validLaunchRequest({ engine: { name: 'opencode', adapterVersion: '1' } } as never)),
+    () => validateLaunchRequest(validLaunchRequest({ engine: { name: '', adapterVersion: '1' } } as never)),
     (error: unknown) => error instanceof ValidationError && error.issues.some((i) => i.includes('engine.name')),
   );
+});
+
+test('требует ветку рана и адрес возврата результата', () => {
+  assert.throws(
+    () => validateLaunchRequest(validLaunchRequest({ repository: { fullName: 'owner/name' } } as never)),
+    (error: unknown) => error instanceof ValidationError && error.issues.some((i) => i.includes('repository.branch')),
+  );
+  assert.throws(
+    () => validateLaunchRequest(validLaunchRequest({ resultUrl: 'not-a-url' } as never)),
+    (error: unknown) => error instanceof ValidationError && error.issues.some((i) => i.includes('resultUrl')),
+  );
+});
+
+test('имя и mime выхода опциональны — контракт разрешает опустить их', () => {
+  const spec = validateLaunchRequest(validLaunchRequest({ outputs: [{ path: 'report.md' }] } as never));
+  assert.equal(spec.outputs?.[0]?.name, undefined);
+  assert.equal(spec.outputs?.[0]?.mime, undefined);
+});
+
+test('имя выхода не принимает пустую строку, но отсутствие — принимает', () => {
+  assert.throws(() => validateLaunchRequest(validLaunchRequest({ outputs: [{ path: 'a.md', name: '' }] } as never)));
 });
 
 test('не принимает неверную adapterVersion', () => {

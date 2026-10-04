@@ -337,9 +337,12 @@ test('каталог вместо файла не принимается за в
   await rm(workspace, { recursive: true, force: true });
 });
 
-test('ветка артефактов детерминированная и не трогает историю юзера', () => {
+test('ветка артефактов по умолчанию — agent-run/<runId>', () => {
+  // В контракте ветку задаёт наше API (`repository.branch`); эта функция — страховка
+  // для вызова без ветки, и её форма обязана совпадать с тем, что генерирует API
+  // (`runBranchName()` в external-worker-adapter.ts).
   const runId = 'run_0fdd061d-14c3-42ea-b182-9393ff3564fa';
-  assert.equal(artifactBranch(runId), `opencode-gha-runner/${runId}`);
+  assert.equal(artifactBranch(runId), `agent-run/${runId}`);
   assert.ok(!artifactBranch(runId).includes('..'));
 });
 

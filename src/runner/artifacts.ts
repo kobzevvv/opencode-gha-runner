@@ -15,7 +15,14 @@ import path from 'node:path';
 import type { ArtifactRef, OutputSpec } from '../contracts.js';
 import { isSafeRelativePath } from '../contracts.js';
 
-export const ARTIFACT_BRANCH_PREFIX = 'opencode-gha-runner';
+/**
+ * Ветка рана приходит от нашего API в `repository.branch` — воркер её не выдумывает.
+ *
+ * Раньше здесь было `opencode-gha-runner/<runId>`; контракт изменился: имя ветки знает
+ * только API, потому что только оно знает `runId`, и ветка — единица результата, которую
+ * API мержит одним действием. Функция осталась как страховка для старых вызовов без ветки.
+ */
+export const ARTIFACT_BRANCH_PREFIX = 'agent-run';
 
 export function artifactBranch(runId: string): string {
   return `${ARTIFACT_BRANCH_PREFIX}/${runId}`;
@@ -97,11 +104,15 @@ export async function collectArtifacts(
       continue;
     }
 
+    // `name`/`mime` в контракте опциональны: выводим имя из последнего сегмента пути,
+    // а MIME — по расширению. Так артефакт всегда описывается полностью, даже если
+    // наш API прислал только `path`.
+    const name = output.name ?? path.posix.basename(output.path);
     const { sha256, size } = await sha256File(absolute);
     artifacts.push({
       path: `artifacts/${output.path}`,
-      name: output.name,
-      mime: guessMime(output.name, output.mime),
+      name,
+      mime: guessMime(name, output.mime),
       sha256,
       size,
     });

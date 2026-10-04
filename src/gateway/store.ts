@@ -12,13 +12,20 @@
  * Cloudflare KV для прода) и никакой логики рана внутри.
  */
 
-import type { LaunchRequest, LaunchResult, RunPhase } from '../contracts.js';
+import type { LaunchRequest, LaunchResult, RunPhase, WorkerRunStatus } from '../contracts.js';
 
 export interface StoredRun {
   runId: string;
+  /**
+   * Ключ дедупликации запуска. Наш API повторяет доставку, и повтор с тем же
+   * `operationId` обязан вернуть ту же квитанцию и тот же ран, а не поднять второй.
+   */
+  operationId: string;
   request: LaunchRequest;
   phase: RunPhase;
   createdAt: number;
+  /** Время последнего изменения статуса — уходит в `GET /status`. */
+  updatedAt: number;
   /** id прогона в GitHub Actions — по нему живут cancel и разбор логов. */
   githubRunId: number | null;
   /**
@@ -36,6 +43,13 @@ export interface StoredRun {
 export interface RunStore {
   create(run: StoredRun): Promise<void>;
   get(runId: string): Promise<StoredRun | null>;
+  /** Дедупликация запуска: ран, уже принятый с этим `operationId`. */
+  findByOperationId(operationId: string): Promise<StoredRun | null>;
+  /**
+   * Снять рана. Нужно, когда диспатч не удался: запись о непринятом ране заставила бы
+   * повтор с тем же `operationId` задедуплицироваться в мёртвый ран.
+   */
+  remove(runId: string): Promise<void>;
   /** Помечает рана claimed и возвращает его. Повторный claim возвращает `null`. */
   claim(runId: string, claimToken: string): Promise<StoredRun | null>;
   /** Кладёт финальный результат. Повторная отправка того же результата — no-op. */
@@ -43,6 +57,30 @@ export interface RunStore {
   patch(runId: string, patch: Partial<Pick<StoredRun, 'phase' | 'githubRunId'>>): Promise<void>;
   /** Все не завершённые раны — воркер держит их в памяти для отмены. */
   listActive(): Promise<StoredRun[]>;
+}
+
+/**
+ * Статус рана в терминах контракта.
+ *
+ * Внутренние фазы богаче (`queued | dispatched | claimed | running | done`), но наружу
+ * отдаётся ровно то, что описано в `WorkerRunStatus`: наш API не должен знать, что ран
+ * сначала стоял в очереди GHA, а потом был claim'нут.
+ *
+ * `done` раскрывается по `exitReason`: `cancelled` — отдельный статус, а не `failed`.
+ */
+export function workerStatus(run: StoredRun): WorkerRunStatus {
+  if (run.phase === 'done') {
+    const exitReason = run.result?.exitReason;
+    if (exitReason === 'cancelled') return 'cancelled';
+    return run.result?.status === 'succeeded' ? 'succeeded' : 'failed';
+  }
+  if (run.phase === 'claimed' || run.phase === 'running') return 'running';
+  return 'accepted';
+}
+
+/** Терминальные статусы: только для них отдаётся результат, иначе 409. */
+export function isTerminal(status: WorkerRunStatus): boolean {
+  return status === 'succeeded' || status === 'failed' || status === 'cancelled';
 }
 
 /** Ключ, под которым лежит рана. Префикс важен: по нему же чистится прод. */
@@ -62,6 +100,17 @@ export class MemoryRunStore implements RunStore {
     return run ? structuredClone(run) : null;
   }
 
+  async findByOperationId(operationId: string): Promise<StoredRun | null> {
+    for (const run of this.runs.values()) {
+      if (run.operationId === operationId) return structuredClone(run);
+    }
+    return null;
+  }
+
+  async remove(runId: string): Promise<void> {
+    this.runs.delete(runId);
+  }
+
   async claim(runId: string, claimToken: string): Promise<StoredRun | null> {
     const run = this.runs.get(runId);
     if (!run || run.claimToken !== claimToken || run.phase === 'done') return null;
@@ -76,6 +125,7 @@ export class MemoryRunStore implements RunStore {
     if (run.phase === 'done') return true;
     run.result = structuredClone(result);
     run.phase = 'done';
+    run.updatedAt = Date.now();
     // Ключ LLM больше не нужен: джоба получила его на claim, результат она уже послала.
     run.request = { ...run.request, env: {}, credentials: undefined };
     return true;
@@ -83,7 +133,7 @@ export class MemoryRunStore implements RunStore {
 
   async patch(runId: string, patch: Partial<Pick<StoredRun, 'phase' | 'githubRunId'>>): Promise<void> {
     const run = this.runs.get(runId);
-    if (run) Object.assign(run, patch);
+    if (run) Object.assign(run, patch, { updatedAt: Date.now() });
   }
 
   async listActive(): Promise<StoredRun[]> {
@@ -100,6 +150,14 @@ export interface KvLike {
   list(options: { prefix: string }): Promise<{ keys: { name: string }[] }>;
 }
 
+/**
+ * Индекс дедупликации: `op:{operationId}` → runId.
+ *
+ * Отдельный ключ, а не скан всех ранов: KV `list` отдаёт ключи, но не тела, и искать
+ * по телу пришлось бы читать весь namespace на каждый повтор доставки.
+ */
+export const operationKey = (operationId: string): string => `op:${operationId}`;
+
 /** TTL рана: холодный старт GHA — 15–45 с, но очередь на бесплатных тарифах бывает длиннее. */
 export const RUN_TTL_SECONDS = 60 * 60 * 6;
 
@@ -111,11 +169,23 @@ export class KvRunStore implements RunStore {
 
   async create(run: StoredRun): Promise<void> {
     await this.kv.put(runKey(run.runId), JSON.stringify(run), { expirationTtl: this.ttlSeconds });
+    await this.kv.put(operationKey(run.operationId), run.runId, { expirationTtl: this.ttlSeconds });
   }
 
   async get(runId: string): Promise<StoredRun | null> {
     const raw = await this.kv.get(runKey(runId), 'text');
     return raw ? (JSON.parse(raw) as StoredRun) : null;
+  }
+
+  async findByOperationId(operationId: string): Promise<StoredRun | null> {
+    const runId = await this.kv.get(operationKey(operationId), 'text');
+    return runId ? this.get(runId) : null;
+  }
+
+  async remove(runId: string): Promise<void> {
+    const run = await this.get(runId);
+    await this.kv.delete(runKey(runId));
+    if (run) await this.kv.delete(operationKey(run.operationId));
   }
 
   async claim(runId: string, claimToken: string): Promise<StoredRun | null> {
@@ -133,6 +203,7 @@ export class KvRunStore implements RunStore {
     if (run.phase === 'done') return true;
     run.result = result;
     run.phase = 'done';
+    run.updatedAt = Date.now();
     run.request = { ...run.request, env: {}, credentials: undefined };
     await this.kv.put(runKey(runId), JSON.stringify(run), { expirationTtl: this.ttlSeconds });
     return true;
@@ -141,7 +212,7 @@ export class KvRunStore implements RunStore {
   async patch(runId: string, patch: Partial<Pick<StoredRun, 'phase' | 'githubRunId'>>): Promise<void> {
     const run = await this.get(runId);
     if (!run) return;
-    Object.assign(run, patch);
+    Object.assign(run, patch, { updatedAt: Date.now() });
     await this.kv.put(runKey(runId), JSON.stringify(run), { expirationTtl: this.ttlSeconds });
   }
 

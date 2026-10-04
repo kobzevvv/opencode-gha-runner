@@ -42,8 +42,26 @@ export interface ClaimErrorBody {
 }
 
 export const CLAIM_PATH = '/v1/claim';
-export const RESULT_PATH = (runId: string): string => `/v1/runs/${encodeURIComponent(runId)}/result`;
+
+// ── Маршруты контракта (их зовёт наш API) ──────────────────────────────────────
+/** `GET` — статус рана. */
+export const STATUS_PATH = (runId: string): string => `/v1/runs/${encodeURIComponent(runId)}/status`;
+/** `GET` — финальный `LaunchResult` или 409, пока ран идёт. */
+export const API_RESULT_PATH = (runId: string): string => `/v1/runs/${encodeURIComponent(runId)}/result`;
+/** `POST` — отмена рана. */
 export const CANCEL_PATH = (runId: string): string => `/v1/runs/${encodeURIComponent(runId)}/cancel`;
+
+// ── Внутренний маршрут воркера (его зовёт GHA-джоба) ───────────────────────────
+/**
+ * `POST` — джоба кладёт `LaunchResult` по одноразовому report-токену.
+ *
+ * Отдельный путь от контрактного `/result`: тот `GET`-овый и публичный, а этот
+ * `POST`-овый и по одноразовому токену. Один путь на два разных протокола — приглашение
+ * к путанице, поэтому они разведены.
+ */
+export const REPORT_PATH = (runId: string): string => `/v1/runs/${encodeURIComponent(runId)}/report`;
+
+/** Обратная совместимость: `RUN_PATH` больше не существует как маршрут. */
 export const RUN_PATH = (runId: string): string => `/v1/runs/${encodeURIComponent(runId)}`;
 
 /** Имя переменной по умолчанию — совпадает с тем, чем наш API пользуется для llm-ladder. */

@@ -6,10 +6,12 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { mkdtemp, mkdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { AGENT_CONFIG_TEMPLATE, installAgentConfig, renderAgentConfig } from '../src/runner/agent-config.js';
 import { collectArtifacts, artifactBranch } from '../src/runner/artifacts.js';
 import { capOutput, resolveAgentEnv, runAgent } from '../src/runner/exec.js';
 import { buildChildPath, buildLaunchCommand, identityName, type Identity } from '../src/runner/identity.js';
@@ -338,4 +340,39 @@ test('ветка артефактов детерминированная и не
   const runId = 'run_0fdd061d-14c3-42ea-b182-9393ff3564fa';
   assert.equal(artifactBranch(runId), `opencode-gha-runner/${runId}`);
   assert.ok(!artifactBranch(runId).includes('..'));
+});
+
+// ── конфиг агента ──────────────────────────────────────────────────────────────
+
+test('в конфиг агента попадает ссылка на ключ, а не сам ключ', () => {
+  const template = readFileSync(AGENT_CONFIG_TEMPLATE, 'utf8');
+  const rendered = renderAgentConfig(template, 'MY_CUSTOM_KEY');
+  assert.ok(!rendered.includes('llm-key'));
+  const config = JSON.parse(rendered) as { provider: Record<string, { options: { apiKey: string } }> };
+  for (const provider of Object.values(config.provider)) {
+    assert.equal(provider.options.apiKey, '{env:MY_CUSTOM_KEY}', 'apiKey обязан остаться ссылкой на env');
+  }
+});
+
+test('шаблон конфига валиден и объявляет провайдера', () => {
+  const config = JSON.parse(readFileSync(AGENT_CONFIG_TEMPLATE, 'utf8')) as {
+    provider: Record<string, { options: { baseURL: string }; models: Record<string, unknown> }>;
+  };
+  const provider = config.provider['ladder'];
+  assert.ok(provider, 'провайдер ladder обязан быть в шаблоне');
+  assert.match(provider!.options.baseURL, /^https:\/\//);
+  assert.ok(Object.keys(provider!.models).includes('free'), 'модель free нужна для дешёвых ранов');
+});
+
+test('конфиг ставится в home идентичности с правами 0600 и не трогает workspace', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'gha-home-'));
+  const template = path.join(home, 'template.json');
+  await writeFile(template, readFileSync(AGENT_CONFIG_TEMPLATE, 'utf8'), 'utf8');
+
+  const installed = await installAgentConfig({ identityHome: home, llmKeyEnvName: 'K', templatePath: template });
+  assert.equal(installed, path.join(home, '.config', 'opencode', 'opencode.json'));
+  const mode = (await stat(installed)).mode & 0o777;
+  assert.equal(mode, 0o600, 'конфиг читаться должен только владельцу');
+  assert.ok(JSON.parse(readFileSync(installed, 'utf8')).provider.ladder.options.apiKey.includes('{env:K}'));
+  await rm(home, { recursive: true, force: true });
 });

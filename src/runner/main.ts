@@ -37,6 +37,7 @@ import {
 import { GitHubRepoApi, artifactBranch, buildManifest, collectArtifacts } from './artifacts.js';
 import { resolveAgentEnv, runAgent } from './exec.js';
 import { createRunIdentity, destroyRunIdentity, isBinaryAvailable, type Identity } from './identity.js';
+import { installAgentConfig } from './agent-config.js';
 import { uploadSessionLog, type LogUploadMode } from './logs.js';
 
 const exec = promisify(execFile);
@@ -56,6 +57,8 @@ export interface RunnerEnv {
   AGENT_ARGS?: string;
   /** `false` — запретить sudo, чтобы прогнать приёмку без создания пользователей. */
   ALLOW_SUDO?: string;
+  /** `skip` — не ставить конфиг провайдера (агент уже сконфигурирован в репозитории). */
+  AGENT_CONFIG?: string;
 }
 
 const startedAt = new Date();
@@ -276,6 +279,22 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       logFile,
       `# run ${runId} job ${spec.jobId} started ${startedAt.toISOString()}\nagent=${claim.agentBinary}\n`,
     );
+
+    // Провайдер агента: без этого opencode ушёл бы в свой дефолтный и упал бы на
+    // авторизации уже после старта — как `nonzero_exit`, а не как preflight-отказ.
+    let agentConfigPath = '';
+    if (env.AGENT_CONFIG !== 'skip') {
+      try {
+        agentConfigPath = await installAgentConfig({
+          identityHome: identity.home,
+          llmKeyEnvName: claim.llmKeyEnvName,
+        });
+        logLine(`agent config installed: ${agentConfigPath}`);
+      } catch (cause) {
+        const safeSummary = redact(cause instanceof Error ? cause.message : String(cause));
+        logLine(`agent config not installed: ${safeSummary}`);
+      }
+    }
 
     // ── 4. запуск агента ───────────────────────────────────────────────────────
     const processEnv = resolveAgentEnv({

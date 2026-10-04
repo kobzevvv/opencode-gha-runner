@@ -74,6 +74,7 @@ jobs:
           GCS_LOG_BUCKET: ${{ vars.GCS_LOG_BUCKET }}
           WORKSPACE_ROOT: ${{ runner.temp }}
           AGENT_ARGS: ${{ vars.AGENT_ARGS }}
+          AGENT_CONFIG: ${{ vars.AGENT_CONFIG }}
           # Passwordless sudo — штатное свойство GitHub-hosted раннера, поэтому
           # per_run_unix_identity ставится по-настоящему, а не имитируется.
           ALLOW_SUDO: 'true'

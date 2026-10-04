@@ -1,0 +1,26 @@
+{
+  "name": "opencode-gha-runner",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "External OpenCode worker for Serverless Agent API: launches agent runs in GitHub Actions on demand",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "npm run build && node dist/gateway/dev.js",
+    "test": "npm run build && node --test \"dist/test/*.test.js\"",
+    "smoke": "npm run build && node dist/scripts/smoke.js",
+    "deploy": "wrangler deploy",
+    "deploy:dry": "wrangler deploy --dry-run",
+    "verify": "npm run typecheck && npm test && npm run smoke"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "@types/node": "^22.20.5",
+    "typescript": "^5.7.3",
+    "wrangler": "^3.99.0"
+  }
+}

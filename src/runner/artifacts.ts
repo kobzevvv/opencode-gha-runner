@@ -1,0 +1,326 @@
+/**
+ * Артефакты рана: объявленные выходы → коммит в репозиторий юзера.
+ *
+ * Issue #73, ключевое требование 1: «Артефакты — в GitHub-репозиторий юзера
+ * (`repository.fullName`), НЕ в наш API». То есть воркер не отдаёт байты — он кладёт
+ * их в репозиторий и возвращает `repo: { fullName, commit }`.
+ *
+ * Ветка детерминированная — `opencode-gha-runner/<runId>`. Так артефакты рана не
+ * смешиваются с историей пользователя, но адрес ветки наш API может вычислить сам.
+ */
+
+import { createHash } from 'node:crypto';
+import { readdir, readFile, realpath, stat } from 'node:fs/promises';
+import path from 'node:path';
+import type { ArtifactRef, OutputSpec } from '../contracts.js';
+import { isSafeRelativePath } from '../contracts.js';
+
+export const ARTIFACT_BRANCH_PREFIX = 'opencode-gha-runner';
+
+export function artifactBranch(runId: string): string {
+  return `${ARTIFACT_BRANCH_PREFIX}/${runId}`;
+}
+
+export interface CollectResult {
+  artifacts: ArtifactRef[];
+  /** Объявленные, но отсутствующие на диске — их absence не должна быть тихой. */
+  missing: string[];
+  /** Найденные, но не объявленные: попадают в манифест, но не считаются результатом. */
+  undeclared: string[];
+}
+
+export async function sha256File(filePath: string): Promise<{ sha256: string; size: number }> {
+  const buffer = await readFile(filePath);
+  return { sha256: createHash('sha256').update(buffer).digest('hex'), size: buffer.length };
+}
+
+function guessMime(name: string, declared: string | undefined): string {
+  if (declared && declared.length > 0) return declared;
+  const ext = path.extname(name).toLowerCase();
+  const table: Record<string, string> = {
+    '.md': 'text/markdown',
+    '.txt': 'text/plain',
+    '.json': 'application/json',
+    '.html': 'text/html',
+    '.csv': 'text/csv',
+    '.pdf': 'application/pdf',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.log': 'text/plain',
+  };
+  return table[ext] ?? 'application/octet-stream';
+}
+
+/**
+ * Читает только объявленные выходы, и только по относительным путям внутри workspace.
+ * Каждый путь проходит проверку на выход из каталога ещё до `readFile` — иначе
+ * `../../.ssh/id_rsa` из `outputs` уехал бы в публичный репозиторий.
+ */
+export async function collectArtifacts(
+  workspace: string,
+  outputs: OutputSpec[] | undefined,
+  readOnlyDirs: string[] = [],
+): Promise<CollectResult> {
+  const artifacts: ArtifactRef[] = [];
+  const missing: string[] = [];
+  const undeclared: string[] = [];
+  const declared = outputs ?? [];
+
+  const workspaceReal = await realpathOrSelf(workspace);
+
+  for (const output of declared) {
+    if (!isSafeRelativePath(output.path)) {
+      missing.push(output.path);
+      continue;
+    }
+    const absolute = path.resolve(workspace, output.path);
+
+    let fileStat;
+    try {
+      fileStat = await stat(absolute);
+    } catch {
+      missing.push(output.path);
+      continue;
+    }
+    if (!fileStat.isFile()) {
+      missing.push(output.path);
+      continue;
+    }
+
+    // Сравниваем через `realpath` с обеих сторон: на macOS `/var` — симлинк в
+    // `/private/var`, и наивное сравнение строк дало бы ложное «путь снаружи».
+    // Симлинк наружу отсекается тем же сравнением — `real` уедет за пределы
+    // workspace, и это ровно тот класс проблемы, что и `..` в пути.
+    const real = await realpath(absolute).catch(() => absolute);
+    if (!isInside(workspaceReal, real)) {
+      missing.push(output.path);
+      continue;
+    }
+
+    const { sha256, size } = await sha256File(absolute);
+    artifacts.push({
+      path: `artifacts/${output.path}`,
+      name: output.name,
+      mime: guessMime(output.name, output.mime),
+      sha256,
+      size,
+    });
+  }
+
+  for (const dir of readOnlyDirs) {
+    const absolute = path.resolve(workspace, dir);
+    try {
+      const real = await realpathOrSelf(absolute);
+      if (!isInside(workspaceReal, real)) continue;
+      const entries = await readdir(real, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        const rel = path.posix.join(dir, entry.name);
+        if (!declared.some((output) => output.path === rel)) undeclared.push(rel);
+      }
+    } catch {
+      // Каталога нет — это не ошибка, а «агент ничего не положил рядом».
+    }
+  }
+
+  return { artifacts, missing, undeclared };
+}
+
+async function realpathOrSelf(target: string): Promise<string> {
+  try {
+    return await realpath(target);
+  } catch {
+    return path.resolve(target);
+  }
+}
+
+function isInside(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative.length > 0 && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+export interface PushResult {
+  fullName: string;
+  commit: string | null;
+  branch: string;
+  pushed: string[];
+}
+
+export interface GitHubRepoApiOptions {
+  token: string;
+  repo: string;
+  fetchImpl?: typeof fetch;
+}
+
+interface ContentsResponse {
+  content?: { sha: string };
+  commit?: { sha: string };
+  message?: string;
+}
+
+/**
+ * Кладёт артефакты в репозиторий через Contents API, а не через `git push`:
+ * один вызов на файл, без клона, без приватного ключа в argv и без `GIT_ASKPASS`.
+ */
+export class GitHubRepoApi {
+  private readonly token: string;
+  private readonly repo: string;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(options: GitHubRepoApiOptions) {
+    this.token = options.token;
+    this.repo = options.repo;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+  }
+
+  private async request<T>(method: string, apiPath: string, body?: unknown): Promise<{ status: number; data: T }> {
+    const response = await this.fetchImpl(`https://api.github.com${apiPath}`, {
+      method,
+      headers: {
+        accept: 'application/vnd.github+json',
+        authorization: `Bearer ${this.token}`,
+        'content-type': 'application/json',
+        'x-github-api-version': '2022-11-28',
+        'user-agent': 'opencode-gha-runner',
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await response.text();
+    let data: unknown;
+    try {
+      data = text.length > 0 ? JSON.parse(text) : undefined;
+    } catch {
+      data = { message: text.slice(0, 300) };
+    }
+    return { status: response.status, data: data as T };
+  }
+
+  private async defaultBranchSha(): Promise<{ branch: string; sha: string } | null> {
+    const repo = await this.request<{ default_branch?: string }>('GET', `/repos/${this.repo}`);
+    const branch = repo.data.default_branch;
+    if (!branch) return null;
+    const ref = await this.request<{ object?: { sha?: string } }>('GET', `/repos/${this.repo}/git/ref/heads/${branch}`);
+    const sha = ref.data.object?.sha;
+    return sha ? { branch, sha } : null;
+  }
+
+  private async branchSha(branch: string): Promise<string | null> {
+    const ref = await this.request<{ object?: { sha?: string } }>('GET', `/repos/${this.repo}/git/ref/heads/${branch}`);
+    return ref.data.object?.sha ?? null;
+  }
+
+  private async createBranch(branch: string, sha: string): Promise<boolean> {
+    const created = await this.request('POST', `/repos/${this.repo}/git/refs`, {
+      ref: `refs/heads/${branch}`,
+      sha,
+    });
+    return created.status === 201;
+  }
+
+  /** Публичная ссылка на файл в конкретной ветке. */
+  fileUrl(branch: string, filePath: string): string {
+    return `https://github.com/${this.repo}/blob/${branch}/${filePath}`;
+  }
+
+  async pushFiles(options: {
+    branch: string;
+    commitMessage: string;
+    files: Array<{ path: string; content: Buffer }>;
+  }): Promise<PushResult> {
+    if (options.files.length === 0) {
+      return { fullName: this.repo, commit: null, branch: options.branch, pushed: [] };
+    }
+
+    const base = await this.defaultBranchSha();
+    let branch = options.branch;
+    let useBranch: string | undefined = branch;
+
+    if (base === null) {
+      // Репозиторий без единого коммита: GitHub не даёт создать ветку от HEAD,
+      // поэтому первый файл кладём прямо в ветку по умолчанию, а ветку создаём вторым.
+      branch = baseBranchFallback;
+      useBranch = undefined;
+    } else if ((await this.branchSha(branch)) === null) {
+      if (!(await this.createBranch(branch, base.sha))) {
+        throw new Error(`could not create branch ${branch}`);
+      }
+    }
+
+    const pushed: string[] = [];
+    for (const file of options.files) {
+      const response = await this.request<ContentsResponse>(
+        'PUT',
+        `/repos/${this.repo}/contents/${filePathToApi(file.path)}`,
+        {
+          message: options.commitMessage,
+          content: file.content.toString('base64'),
+          branch: useBranch,
+        },
+      );
+      if (response.status !== 200 && response.status !== 201) {
+        throw new Error(`could not write ${file.path}: ${response.data.message ?? response.status}`);
+      }
+      pushed.push(file.path);
+    }
+
+    if (base === null) {
+      // Теперь, когда default branch существует, заводим ран-ветку от её головы.
+      const head = await this.branchSha(baseBranchFallback);
+      if (head && (await this.branchSha(options.branch)) === null) {
+        await this.createBranch(options.branch, head);
+      }
+    }
+
+    return {
+      fullName: this.repo,
+      commit: await this.branchSha(options.branch),
+      branch: options.branch,
+      pushed,
+    };
+  }
+}
+
+/** Имя ветки для репозитория, в котором ещё не было ни одного коммита. */
+const baseBranchFallback = 'main';
+
+function filePathToApi(filePath: string): string {
+  return filePath
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+}
+
+/** Манифест рана: кладётся рядом с артефактами, чтобы результат был читаем без нашего API. */
+export function buildManifest(options: {
+  runId: string;
+  jobId: string;
+  exitReason: string;
+  exitCode: number | null;
+  durationMs: number;
+  artifacts: ArtifactRef[];
+  missingOutputs: string[];
+  logUrl: string;
+  startedAt: string;
+  finishedAt: string;
+}): Buffer {
+  return Buffer.from(
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        runId: options.runId,
+        jobId: options.jobId,
+        exitReason: options.exitReason,
+        exitCode: options.exitCode,
+        durationMs: options.durationMs,
+        artifacts: options.artifacts,
+        missingOutputs: options.missingOutputs,
+        logUrl: options.logUrl,
+        startedAt: options.startedAt,
+        finishedAt: options.finishedAt,
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
+}

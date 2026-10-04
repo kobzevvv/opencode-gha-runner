@@ -44,11 +44,21 @@ export async function installAgentConfig(options: {
   identityHome: string;
   llmKeyEnvName: string;
   templatePath?: string;
+  /**
+   * Записать конфиг. По умолчанию — обычная запись, но вызывающий обязан передать
+   * функцию, пишущую под идентичностью: `~/.config/opencode` принадлежит UID рана,
+   * и запись из процесса раннера падает с EACCES.
+   */
+  write?: (target: string, contents: string) => Promise<void>;
 }): Promise<string> {
   const template = await readFile(options.templatePath ?? AGENT_CONFIG_TEMPLATE, 'utf8');
   const rendered = renderAgentConfig(template, options.llmKeyEnvName);
   const target = path.join(options.identityHome, '.config', 'opencode', 'opencode.json');
-  await mkdir(path.dirname(target), { recursive: true });
-  await writeFile(target, rendered, { encoding: 'utf8', mode: 0o600 });
+  if (options.write) {
+    await options.write(target, rendered);
+  } else {
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, rendered, { encoding: 'utf8', mode: 0o600 });
+  }
   return target;
 }

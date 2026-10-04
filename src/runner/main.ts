@@ -21,7 +21,7 @@
 
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { appendFile, mkdir, rm, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
@@ -250,6 +250,8 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       return RUNNER_EXIT.preflightRefused;
     }
     logLine(`identity=${identity.name} uid=${identity.uid} enforced=${identity.enforced}`);
+    // Алиас без `| null`: ниже identity используется в замыканиях, где narrowing не работает.
+    const identityOfRun = identity;
 
     const artifactsToken = env.ARTIFACTS_TOKEN ?? '';
     if (artifactsToken.length === 0) {
@@ -282,7 +284,11 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       return RUNNER_EXIT.cloneFailed;
     }
 
-    const logFile = path.join(workspace, '.agent', 'session.log');
+    // Лог сессии живёт ВНЕ workspace. Workspace принадлежит идентичности рана
+    // (755, owner — uid рана), и процесс раннера не может писать в него: `EACCES
+    // ... mkdir .agent`. Кроме того, агент не должен видеть свой же лог в
+    // собственной рабочей папке, а артефакты собираются из объявленных путей.
+    const logFile = path.join(workspaceRoot, 'session-logs', runId, 'session.log');
     await sessionLog.open(
       logFile,
       `# run ${runId} job ${spec.jobId} started ${startedAt.toISOString()}\nagent=${claim.agentBinary}\n`,
@@ -290,12 +296,26 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
 
     // Провайдер агента: без этого opencode ушёл бы в свой дефолтный и упал бы на
     // авторизации уже после старта — как `nonzero_exit`, а не как preflight-отказ.
+    // Пишем под идентичностью: `~/.config/opencode` принадлежит UID рана.
     let agentConfigPath = '';
     if (env.AGENT_CONFIG !== 'skip') {
       try {
         agentConfigPath = await installAgentConfig({
-          identityHome: identity.home,
+          identityHome: identityOfRun.home,
           llmKeyEnvName: claim.llmKeyEnvName,
+          write: async (target, contents) => {
+            // Конфиг готовим в каталоге раннера, куда есть доступ от обоих UID, и
+            // переносим под идентичность: `~/.config/opencode` принадлежит UID рана,
+            // и прямая запись из процесса раннера падает с EACCES.
+            const staging = path.join(workspaceRoot, 'session-logs', runId, 'opencode.json');
+            await mkdir(path.dirname(staging), { recursive: true });
+            await writeFile(staging, contents, { encoding: 'utf8', mode: 0o600 });
+            await runUnderIdentity(identityOfRun, 'cp', [staging, target], {
+              PATH: process.env['PATH'] ?? '/usr/bin:/bin',
+              HOME: identityOfRun.home,
+            });
+            await chmod(target, 0o600);
+          },
         });
         logLine(`agent config installed: ${agentConfigPath}`);
       } catch (cause) {

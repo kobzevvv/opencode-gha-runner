@@ -35,6 +35,37 @@ export interface GitHubClientOptions {
 
 const JSON_HEADERS = { 'content-type': 'application/json', accept: 'application/vnd.github+json' };
 
+/**
+ * Ошибка `workflow_dispatch`.
+ *
+ * `status === null` означает, что ответа не было вовсе (сеть, таймаут): диспатч мог
+ * и пройти. Это принципиально отличается от явного 4xx, когда GitHub запрос отверг и
+ * прогона заведомо не существует, — от этого различия зависит, можно ли забыть ран
+ * и разрешить повтору диспатчить заново.
+ */
+export class DispatchError extends Error {
+  readonly status: number | null;
+
+  constructor(message: string, status: number | null) {
+    super(message);
+    this.name = 'DispatchError';
+    this.status = status;
+  }
+
+  /** GitHub отверг запрос: 4xx (нет workflow, нет прав, нет репо). Прогона нет. */
+  get rejected(): boolean {
+    return this.status !== null && this.status >= 400 && this.status < 500;
+  }
+}
+
+/** Ран workflow_dispatch в списке прогонов. */
+export interface WorkflowRunSummary {
+  id: number;
+  headSha: string;
+  status: string;
+  createdAtMs: number | null;
+}
+
 export class GitHubClient {
   private readonly token: string;
   private readonly repo: string;
@@ -86,27 +117,37 @@ export class GitHubClient {
    */
   async dispatchWorkflow(input: DispatchInput): Promise<DispatchResult> {
     const branch = await this.resolveRef();
-    const before = await this.headSha(branch);
+    // Момент диспатча — единственная зацепка для корреляции: GitHub не отдаёт inputs
+    // прогона списком, поэтому «наш» ран ищется как самый свежий, созданный после этого
+    // времени. Так же восстанавливается ран, чей ответ на диспатч потерялся.
+    const startedAt = Date.now();
 
-    const { status, data } = await this.request<{ message?: string }>(
-      'POST',
-      `/repos/${this.repo}/actions/workflows/${this.workflow}/dispatches`,
-      {
-        // `ref` обязателен в REST API, хотя в UI выбирается неявно. Без него GitHub
-        // отвечает 422 «"ref" wasn't supplied», поэтому ветка резолвится всегда —
-        // либо из конфига, либо из default branch репозитория.
-        ref: branch,
-        inputs: {
-          run_id: input.runId,
-          claim_token: input.claimToken,
+    let status: number;
+    let data: { message?: string };
+    try {
+      ({ status, data } = await this.request<{ message?: string }>(
+        'POST',
+        `/repos/${this.repo}/actions/workflows/${this.workflow}/dispatches`,
+        {
+          // `ref` обязателен в REST API, хотя в UI выбирается неявно. Без него GitHub
+          // отвечает 422 «"ref" wasn't supplied», поэтому ветка резолвится всегда —
+          // либо из конфига, либо из default branch репозитория.
+          ref: branch,
+          inputs: {
+            run_id: input.runId,
+            claim_token: input.claimToken,
+          },
         },
-      },
-    );
+      ));
+    } catch (cause) {
+      // Ответа не было: диспатч мог пройти, поэтому status null — «неизвестно», а не «нет».
+      throw new DispatchError(`workflow_dispatch failed: ${cause instanceof Error ? cause.message : String(cause)}`, null);
+    }
     if (status !== 204) {
-      throw new Error(`workflow_dispatch failed with ${status}: ${data?.message ?? 'unknown error'}`);
+      throw new DispatchError(`workflow_dispatch failed with ${status}: ${data?.message ?? 'unknown error'}`, status);
     }
 
-    const runId = await this.waitForRunId(branch, before);
+    const runId = await this.waitForRunId(startedAt);
     return { runId, htmlUrl: `https://github.com/${this.repo}/actions/runs/${runId}` };
   }
 
@@ -124,13 +165,39 @@ export class GitHubClient {
   }
 
   /** Список прогонов этого workflow, от свежих к старым. */
-  private async listWorkflowRuns(perPage = 10): Promise<Array<{ id: number; head_sha: string; status: string }>> {
+  private async listWorkflowRuns(perPage = 20): Promise<WorkflowRunSummary[]> {
     const params = new URLSearchParams({ per_page: String(perPage), event: 'workflow_dispatch' });
-    const { data } = await this.request<{ workflow_runs?: Array<{ id: number; head_sha: string; status: string }> }>(
-      'GET',
-      `/repos/${this.repo}/actions/workflows/${this.workflow}/runs?${params}`,
-    );
-    return data.workflow_runs ?? [];
+    const { data } = await this.request<{
+      workflow_runs?: Array<{ id: number; head_sha: string; status: string; created_at?: string }>;
+    }>('GET', `/repos/${this.repo}/actions/workflows/${this.workflow}/runs?${params}`);
+    return (data.workflow_runs ?? []).map((run) => ({
+      id: run.id,
+      headSha: run.head_sha,
+      status: run.status,
+      createdAtMs: run.created_at ? Date.parse(run.created_at) : null,
+    }));
+  }
+
+  /**
+   * Прогон, появившийся после `sinceMs`, — чтобы понять, прошёл ли диспатч, чей ответ
+   * потерялся.
+   *
+   * Точной корреляции по `operationId` у GitHub нет: inputs прогона не отдаются списком.
+   * Поэтому опираемся на время создания плюс отсечку по `head_sha` ветки, а остаточный
+   * риск (два диспатча в одном окне) гасит claim-токен: вторая джоба с тем же токеном
+   * получает 409 и выходит, не запуская агента.
+   */
+  async findRunSince(sinceMs: number, options: { skewMs?: number } = {}): Promise<WorkflowRunSummary | null> {
+    const skew = options.skewMs ?? 30_000;
+    const floor = sinceMs - skew;
+    const branch = await this.resolveRef();
+    const head = await this.headSha(branch);
+    const runs = await this.listWorkflowRuns();
+    const candidates = runs
+      .filter((run) => run.createdAtMs !== null && run.createdAtMs >= floor)
+      .filter((run) => head.length === 0 || run.headSha === head)
+      .sort((a, b) => (b.createdAtMs ?? 0) - (a.createdAtMs ?? 0));
+    return candidates[0] ?? null;
   }
 
   private async headSha(branch: string): Promise<string> {
@@ -145,21 +212,16 @@ export class GitHubClient {
    * `workflow_dispatch` отвечает `204` без тела, поэтому `run_id` приходится искать
    * вторым вызовом — без него нечем отменять рана.
    *
-   * Берём первый прогон со статусом `queued`/`in_progress`: только что запущенный рана
-   * всегда в этих статусах, а завершённые — `completed`. Если таких нет (диспатч был
-   * секунду назад и статус уже сменился), сходим во второй раз и берём самый свежий.
+   * Ищем по времени диспатча, а не «первый queued»: при параллельных запусках первый
+   * queued может оказаться чужим прогоном, и тогда отмена погасила бы не тот ран.
+   * GitHub событийно-консистентен, поэтому ждём появления с нарастающей паузой.
    */
-  private async waitForRunId(branch: string, beforeSha: string, attempts = 8): Promise<number> {
+  private async waitForRunId(sinceMs: number, attempts = 8): Promise<number> {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const runs = await this.listWorkflowRuns();
-      const fresh = runs.find((run) => run.status === 'queued' || run.status === 'in_progress');
-      if (fresh) return fresh.id;
-      const sameCommit = runs.find((run) => run.head_sha === beforeSha);
-      if (sameCommit && attempt >= 2) return sameCommit.id;
+      const run = await this.findRunSince(sinceMs);
+      if (run) return run.id;
       await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
     }
-    const runs = await this.listWorkflowRuns();
-    if (runs.length > 0) return runs[0]!.id;
     throw new Error('workflow_dispatch accepted but no run appeared in the workflow run list');
   }
 

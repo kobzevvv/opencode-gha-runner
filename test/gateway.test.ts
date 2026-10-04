@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createGateway, type GatewayConfig } from '../src/gateway/app.js';
-import type { DispatchResult, GitHubClient } from '../src/gateway/github.js';
+import { DispatchError, GitHubClient, type DispatchResult } from '../src/gateway/github.js';
 import { MemoryRunStore } from '../src/gateway/store.js';
 import { validLaunchRequest } from './contracts.test.js';
 
@@ -33,18 +33,34 @@ interface Harness {
   delivered: Array<{ url: string; auth: string | null; body: unknown }>;
 }
 
-function harness(options: { dispatchThrows?: boolean; deliveryStatus?: number } = {}): Harness {
+function harness(options: {
+  /** `rejected` — явный 4xx (прогона нет); `ambiguous` — сеть/5xx (мог пройти). */
+  dispatchFails?: 'rejected' | 'ambiguous';
+  /** Что вернёт `findRunSince` при неоднозначном отказе. `null` — прогона не появилось. */
+  runAppeared?: { id: number } | null;
+  deliveryStatus?: number;
+} = {}): Harness {
   const store = new MemoryRunStore();
   const dispatched: Array<{ runId: string; claimToken: string }> = [];
   const cancelled: number[] = [];
   const delivered: Array<{ url: string; auth: string | null; body: unknown }> = [];
   let counter = 0;
+  let findRunSinceCalls = 0;
 
   const github = {
     dispatchWorkflow: async (input: { runId: string; claimToken: string }): Promise<DispatchResult> => {
-      if (options.dispatchThrows) throw new Error('boom 500 from github');
+      if (options.dispatchFails === 'rejected') {
+        throw new DispatchError('workflow_dispatch failed with 422: Invalid request.', 422);
+      }
+      if (options.dispatchFails === 'ambiguous') {
+        throw new DispatchError('workflow_dispatch failed: fetch failed', null);
+      }
       dispatched.push(input);
       return { runId: 4242, htmlUrl: 'https://github.com/x/y/actions/runs/4242' };
+    },
+    findRunSince: async () => {
+      findRunSinceCalls += 1;
+      return options.runAppeared ? { id: options.runAppeared.id, headSha: 'x', status: 'queued', createdAtMs: Date.now() } : null;
     },
     cancelWorkflowRun: async (runId: number) => {
       cancelled.push(runId);
@@ -183,14 +199,39 @@ test('дедупликация по operationId: повтор не подним�
   assert.equal(second['operationId'], first['operationId']);
 });
 
-test('неудачный диспатч — 502 и запись снята, чтобы повтор сработал', async () => {
-  const h = harness({ dispatchThrows: true });
+test('явный 4xx: прогона нет, запись снята — повтор диспатчит заново', async () => {
+  const h = harness({ dispatchFails: 'rejected' });
   const response = await h.fetch(launch(spec()));
   assert.equal(response.status, 502);
   assert.equal(((await response.json()) as { failure: { code: string } }).failure.code, 'WORKER_INTERNAL');
-
   // Если бы запись осталась, повтор с тем же operationId задедуплицировался бы в мёртвый ран.
   assert.equal(await h.store.get(RUN_ID), null);
+
+  const retry = harness();
+  assert.equal((await retry.fetch(launch(spec()))).status, 202);
+});
+
+test('неоднозначный отказ + прогон появился: ран усыновлён, а не пересоздан', async () => {
+  // Диспатч прошёл, а ответ потерялся. Если забыть ран и позволить повтору
+  // диспатчить заново, поднимется вторая GHA-джоба там, где первая уже работает —
+  // ровно тот дефект, который дедупликация по operationId обязана исключать.
+  const h = harness({ dispatchFails: 'ambiguous', runAppeared: { id: 9090 } });
+  const response = await h.fetch(launch(spec()));
+  assert.equal(response.status, 202, 'ответ потерялся, но прогон есть — это успех');
+  const body = (await response.json()) as Record<string, unknown>;
+  assert.equal(body['status'], 'accepted');
+
+  const stored = await h.store.get(RUN_ID);
+  assert.equal(stored?.phase, 'dispatched');
+  assert.equal(stored?.githubRunId, 9090, 'усыновлён именно появившийся прогон');
+});
+
+test('неоднозначный отказ + прогона нет: запись снята, повтор безопасен', async () => {
+  const h = harness({ dispatchFails: 'ambiguous', runAppeared: null });
+  const response = await h.fetch(launch(spec()));
+  assert.equal(response.status, 502);
+  assert.equal(await h.store.get(RUN_ID), null);
+
   const retry = harness();
   assert.equal((await retry.fetch(launch(spec()))).status, 202);
 });
@@ -356,4 +397,80 @@ test('claim отдаёт spec с ключом и гасит токен', async (
 test('неизвестный путь — 404', async () => {
   const h = harness();
   assert.equal((await h.fetch(get('/v1/nope'))).status, 404);
+});
+
+// ── клиент GitHub: различение «отверг» и «неизвестно» ──────────────────────────
+
+test('DispatchError.rejected истинно только для 4xx', () => {
+  assert.equal(new DispatchError('x', 422).rejected, true);
+  assert.equal(new DispatchError('x', 403).rejected, true);
+  assert.equal(new DispatchError('x', 404).rejected, true);
+  // 5xx — GitHub мог успеть создать прогон до того, как упал: это «неизвестно».
+  assert.equal(new DispatchError('x', 500).rejected, false);
+  assert.equal(new DispatchError('x', 502).rejected, false);
+  // Ответа не было вовсе — тем более «неизвестно».
+  assert.equal(new DispatchError('x', null).rejected, false);
+});
+
+test('findRunSince берёт самый свежий прогон после диспатча, а не первый попавшийся', async () => {
+  const now = Date.now();
+  const runs = [
+    { id: 1, head_sha: 'head-1', status: 'queued', created_at: new Date(now - 600_000).toISOString() },
+    { id: 2, head_sha: 'head-1', status: 'in_progress', created_at: new Date(now - 5_000).toISOString() },
+    { id: 3, head_sha: 'head-1', status: 'queued', created_at: new Date(now - 1_000).toISOString() },
+  ];
+  const fakeFetch = (async (url: string | URL) => {
+    const href = String(url);
+    if (href.includes('/git/ref/heads/')) {
+      return new Response(JSON.stringify({ object: { sha: 'head-1' } }), { status: 200 });
+    }
+    if (href.includes('/actions/workflows/')) {
+      return new Response(JSON.stringify({ workflow_runs: runs }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ default_branch: 'main' }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const client = new GitHubClient({ token: 't', repo: 'o/r', workflow: 'run-agent.yml', fetchImpl: fakeFetch });
+  const found = await client.findRunSince(now - 10_000);
+  assert.equal(found?.id, 3, 'самый свежий в окне, а не первый в списке');
+});
+
+test('findRunSince не отдаёт прогон с чужого коммита', async () => {
+  const now = Date.now();
+  const fakeFetch = (async (url: string | URL) => {
+    const href = String(url);
+    if (href.includes('/git/ref/heads/')) {
+      return new Response(JSON.stringify({ object: { sha: 'наш-коммит' } }), { status: 200 });
+    }
+    if (href.includes('/actions/workflows/')) {
+      return new Response(
+        JSON.stringify({
+          workflow_runs: [{ id: 7, head_sha: 'чужой-коммит', status: 'queued', created_at: new Date(now - 1000).toISOString() }],
+        }),
+        { status: 200 },
+      );
+    }
+    return new Response(JSON.stringify({ default_branch: 'main' }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const client = new GitHubClient({ token: 't', repo: 'o/r', workflow: 'run-agent.yml', fetchImpl: fakeFetch });
+  assert.equal(await client.findRunSince(now - 10_000), null);
+});
+
+test('findRunSince отдаёт null, когда прогонов в окне нет', async () => {
+  const now = Date.now();
+  const fakeFetch = (async (url: string | URL) => {
+    const href = String(url);
+    if (href.includes('/git/ref/heads/')) return new Response(JSON.stringify({ object: { sha: 'h' } }), { status: 200 });
+    if (href.includes('/actions/workflows/')) {
+      return new Response(
+        JSON.stringify({ workflow_runs: [{ id: 1, head_sha: 'h', status: 'completed', created_at: new Date(now - 3_600_000).toISOString() }] }),
+        { status: 200 },
+      );
+    }
+    return new Response(JSON.stringify({ default_branch: 'main' }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const client = new GitHubClient({ token: 't', repo: 'o/r', workflow: 'run-agent.yml', fetchImpl: fakeFetch });
+  assert.equal(await client.findRunSince(now - 10_000), null);
 });

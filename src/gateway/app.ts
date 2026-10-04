@@ -28,7 +28,7 @@ import {
   type LaunchRequest,
   type LaunchResult,
 } from '../contracts.js';
-import { GitHubClient, type GitHubClientOptions } from './github.js';
+import { DispatchError, GitHubClient, type GitHubClientOptions } from './github.js';
 import { isTerminal, workerStatus, type RunStore, type StoredRun } from './store.js';
 
 export interface GatewayConfig {
@@ -165,16 +165,36 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
 
     log('dispatching run', { runId: spec.runId, operationId: spec.operationId, engine: spec.engine.name });
 
+    // Момент до диспатча: по нему ищем прогон, если ответ потеряется.
+    const dispatchStartedAt = now();
     try {
       const dispatched = await github.dispatchWorkflow({ runId: spec.runId, claimToken });
       await store.patch(spec.runId, { phase: 'dispatched', githubRunId: dispatched.runId });
     } catch (cause) {
-      // Диспатч не удался — ран не принят. Снимаем запись, иначе повтор с тем же
-      // operationId задедуплицировался бы в мёртвый ран и застрял бы навсегда.
+      const rejected = cause instanceof DispatchError && cause.rejected;
+
+      // Явный 4xx — GitHub запрос отверг (нет workflow, нет прав, нет репо), прогона
+      // заведомо нет. Снимаем запись, чтобы повтор с тем же operationId не
+      // задедуплицировался в мёртвый ран, и повтор диспатчит заново.
+      if (!rejected) {
+        // Ответа не было или пришёл 5xx: диспатч **мог** пройти. Прежде чем забывать
+        // ран, спрашиваем GitHub, появился ли прогон. Иначе повтор поднял бы вторую
+        // GHA-джобу там, где первая уже работает, — ровно тот дефект, который
+        // дедупликация по operationId обязана исключать.
+        const adopted = await github.findRunSince(dispatchStartedAt).catch(() => null);
+        if (adopted) {
+          await store.patch(spec.runId, { phase: 'dispatched', githubRunId: adopted.id });
+          log('dispatch recovered after a lost response', { runId: spec.runId, githubRunId: adopted.id });
+          const recovered = await store.get(spec.runId);
+          if (recovered) return json(receipt(recovered), 202, noStore());
+        }
+      }
+
       await store.remove(spec.runId);
       const safeSummary = redact(cause instanceof Error ? cause.message : String(cause));
-      log('dispatch failed', { runId: spec.runId, error: safeSummary });
+      log('dispatch failed', { runId: spec.runId, rejected, error: safeSummary });
       // 502: наш API должен понять, что дело в воркере, и повторить — это retryable.
+      // Повтор безопасен: ран снят, второй джобы не будет.
       return json(
         {
           runId: spec.runId,

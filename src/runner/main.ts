@@ -345,10 +345,12 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       identityHome: identity.home,
       llmKeyEnvName: claim.llmKeyEnvName,
       llmKey: claim.llmKey,
+      isolationEnforced: identity.enforced,
     });
     const extraArgs = (env.AGENT_ARGS ?? '').split(' ').filter(Boolean);
     const agentArgs = [...extraArgs, 'run', spec.input.inlinePrompt];
-    sessionLog.append('stdout', `\n$ ${claim.agentBinary} ${agentArgs.map((_, i) => (i === agentArgs.length - 1 ? '<prompt>' : i >= extraArgs.length ? '<arg>' : i)).join(' ')}\n`);
+    // Промпт в лог не пишем: он может содержать секреты, а лог уезжает в GCS.
+    sessionLog.append('stdout', `\n$ ${claim.agentBinary} ${extraArgs.join(' ')} run <prompt>\n`);
 
     const outcome = await runAgent({
       identity,

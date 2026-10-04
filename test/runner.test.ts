@@ -411,3 +411,29 @@ test('parentDirs не включает сам каталог и не трога�
   assert.deepEqual(parentDirs('/a'), []);
   assert.ok(!parentDirs('/a/b/c').includes('/a/b/c'));
 });
+
+test('при включённой изоляции HOME всегда указывает на home идентичности', () => {
+  // Регрессия: наш API присылал HOME=/home/runner, процесс шёл под UID рана, и
+  // opencode падал с `PermissionDenied: FileSystem.open
+  // (/home/runner/.local/share/opencode/log/opencode.log)`.
+  const env = resolveAgentEnv({
+    envAllowlist: ['HOME'],
+    env: { HOME: '/home/runner' },
+    identityHome: '/home/ocrun-abc',
+    llmKeyEnvName: 'K',
+    llmKey: '',
+    isolationEnforced: true,
+  });
+  assert.equal(env['HOME'], '/home/ocrun-abc', 'при изоляции HOME обязан быть home идентичности');
+});
+
+test('без изоляции переданный HOME уважается', () => {
+  const env = resolveAgentEnv({
+    envAllowlist: ['HOME'],
+    env: { HOME: '/home/runner' },
+    identityHome: '/home/ocrun-abc',
+    llmKeyEnvName: 'K',
+    llmKey: '',
+  });
+  assert.equal(env['HOME'], '/home/runner');
+});

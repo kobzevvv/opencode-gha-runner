@@ -172,6 +172,13 @@ export function resolveAgentEnv(options: {
   llmKeyEnvName: string;
   llmKey: string;
   extra?: Record<string, string>;
+  /**
+   * Изоляция включена. Тогда HOME всегда указывает на home идентичности, даже если
+   * наш API прислал своё значение: процесс идёт под UID рана, и opencode не смог бы
+   * писать свой лог в `/home/runner/.local/share/opencode/log` — падал с
+   * `PermissionDenied: FileSystem.open`.
+   */
+  isolationEnforced?: boolean;
 }): Record<string, string> {
   const allow = new Set(options.envAllowlist);
   const resolved: Record<string, string> = {};
@@ -185,6 +192,10 @@ export function resolveAgentEnv(options: {
     // HOME без значения означал бы, что агент пишет в HOME хоста — это ровно то, чего
     // изоляция не должна допускать. Подставляем home идентичности рана.
     if (name === 'HOME') resolved['HOME'] = options.identityHome;
+  }
+
+  if (options.isolationEnforced) {
+    resolved['HOME'] = options.identityHome;
   }
 
   if (options.llmKey.length > 0) {

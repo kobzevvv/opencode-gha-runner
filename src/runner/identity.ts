@@ -13,7 +13,7 @@
  * честно сообщает об этом, а не притворяется, что изоляция есть.
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -242,19 +242,74 @@ export async function isBinaryAvailable(binary: string): Promise<boolean> {
   return (await resolveBinaryAbsolute(binary)) !== null;
 }
 
+export interface CommandResult {
+  stdout: string;
+  stderr: string;
+}
+
+export class CommandError extends Error {
+  readonly exitCode: number | null;
+  readonly signal: NodeJS.Signals | null;
+
+  constructor(message: string, exitCode: number | null, signal: NodeJS.Signals | null) {
+    super(message);
+    this.name = 'CommandError';
+    this.exitCode = exitCode;
+    this.signal = signal;
+  }
+}
+
 /**
- * Запускает произвольную команду под идентичностью рана.
+ * Запускает команду под идентичностью рана, возвращая stdout и stderr.
  *
  * Нужно для всего, что пишет в workspace: клон, установка зависимостей, сам агент.
  * Пока клон шёл под пользователем раннера, а workspace принадлежал идентичности —
  * `git clone` падал с «Permission denied» на `.git`, потому что создать каталог внутри
  * чужого 755-каталога раннер не мог.
+ *
+ * stderr возвращается отдельно и попадает в текст ошибки: `promisify(execFile)`
+ * сообщает только `Command failed: ...` без stderr, и диагностика занимала лишний
+ * запуск на каждый такой баг.
  */
-export function execAsIdentity(
+export function runUnderIdentity(
   identity: Identity,
   command: string,
   argv: string[],
   env: Record<string, string>,
-): { command: string; argv: string[] } {
-  return buildLaunchCommand({ identity, binary: command, argv, env });
+): Promise<CommandResult> {
+  const launch = buildLaunchCommand({ identity, binary: command, argv, env });
+  return new Promise<CommandResult>((resolve, reject) => {
+    const child = spawn(launch.command, launch.argv, {
+      cwd: identity.workspace,
+      env: { PATH: MINIMAL_PATH },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf8');
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8');
+    });
+    child.once('error', (cause) => {
+      reject(new CommandError(`failed to spawn ${command}: ${cause.message}`, null, null));
+    });
+    child.once('close', (code, signal) => {
+      const result: CommandResult = { stdout, stderr };
+      if (code === 0 && signal === null) {
+        resolve(result);
+        return;
+      }
+      const detail = stderr.trim().length > 0 ? stderr.trim() : stdout.trim();
+      const summary = detail.length > 0 ? ` — ${detail.split('\n').slice(-6).join(' | ')}` : '';
+      reject(
+        new CommandError(
+          `${command} exited with ${signal ?? code}${summary}`,
+          code,
+          signal,
+        ),
+      );
+    });
+  });
 }

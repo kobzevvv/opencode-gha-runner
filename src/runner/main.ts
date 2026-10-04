@@ -36,7 +36,7 @@ import {
 } from '../contracts.js';
 import { GitHubRepoApi, artifactBranch, buildManifest, collectArtifacts } from './artifacts.js';
 import { resolveAgentEnv, runAgent } from './exec.js';
-import { createRunIdentity, destroyRunIdentity, execAsIdentity, isBinaryAvailable, type Identity } from './identity.js';
+import { createRunIdentity, destroyRunIdentity, isBinaryAvailable, runUnderIdentity, type Identity } from './identity.js';
 import { installAgentConfig } from './agent-config.js';
 import { uploadSessionLog, type LogUploadMode } from './logs.js';
 
@@ -149,7 +149,7 @@ async function cloneWorkspace(
   const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
   // Клон обязан идти под идентичностью рана: workspace принадлежит ей, и под
   // пользователем раннера `git clone` падает с «Permission denied» на `.git`.
-  const launch = execAsIdentity(identity, 'git', ['clone', '--depth', '1', '--quiet', `https://github.com/${spec.repository.fullName}.git`, workspace], {
+  await runUnderIdentity(identity, 'git', ['clone', '--depth', '1', '--quiet', `https://github.com/${spec.repository.fullName}.git`, workspace], {
     PATH: process.env['PATH'] ?? '/usr/bin:/bin',
     // HOME — home идентичности: git пишет в `$HOME/.config/git`, а у раннера он 700.
     HOME: identity.home,
@@ -158,7 +158,6 @@ async function cloneWorkspace(
     GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
     GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${basic}`,
   });
-  await exec(launch.command, launch.argv);
 }
 
 export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv): Promise<number> {

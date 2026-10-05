@@ -37,6 +37,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -66,7 +68,7 @@ jobs:
 
       - name: Run agent
         env:
-          GATEWAY_URL: ${{ vars.GATEWAY_URL }}
+          GATEWAY_URL: ${{ github.ref_name == 'integration/final-answer-v1-20261005' && 'https://trained-assist-native-worker-v1-sandbox.skillset-apply.workers.dev' || vars.GATEWAY_URL }}
           RUN_ID: ${{ inputs.run_id }}
           CLAIM_TOKEN: ${{ inputs.claim_token }}
           ARTIFACTS_TOKEN: ${{ secrets.ARTIFACTS_TOKEN }}

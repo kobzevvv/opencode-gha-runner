@@ -7,3 +7,4 @@ Source: architecture issue [#140](https://github.com/trained-assist/trained-agen
 - Declared outputs must exist and have a confirmed publication commit. Publication refusal is not a missing-file failure and must not report final success.
 - Preserve the actual agent exit code and original engine failure. Use the existing LaunchResult `nonzero_exit` terminal vocabulary for worker finalization failures, with explicit non-retryable finalization failure metadata; do not add an unsupported Runner enum.
 - GitHub refusal diagnostics contain only operation and HTTP status, never response bodies or credential values.
+- Live acceptance source must use its own CF gateway and KV, dispatch the integration branch, and claim only from that gateway. Shared workflow variables and Action secrets remain unchanged; provisioning/deployment belongs to parent.

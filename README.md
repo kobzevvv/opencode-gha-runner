@@ -119,6 +119,12 @@ GCP Secret Manager. В репозиторий он не попадает: шлю
 
 ## Локальный запуск и приёмка
 
+### Изолированный интеграционный запуск
+
+`wrangler.integration-v1.toml` выбирает отдельный Worker `trained-assist-native-worker-v1-sandbox`, ветку `integration/final-answer-v1-20261005` и существующий workflow `run-agent.yml`. Только эта ветка использует свой фиксированный `GATEWAY_URL`; остальные ветки сохраняют `vars.GATEWAY_URL`. Checkout закреплён на SHA dispatched workflow. Ring configuration не включается.
+
+Parent provisioner должен создать отдельный KV и заменить `REPLACE_WITH_OWN_KV_NAMESPACE_ID`, проверить соответствие `PUBLIC_BASE_URL` branch-workflow endpoint и отдельно provision Worker secrets `WORKER_TOKEN` / `GITHUB_TOKEN`. Затем `npm run build` и deployment с `-c wrangler.integration-v1.toml`. Не использовать KV/Worker token shared gateway, не менять repository workflow variables или `ARTIFACTS_TOKEN`. Патч не создаёт ресурсы, не деплоит Worker и не запускает задачи.
+
 ### Final answer и обязательные выходы
 
 Связанные баги: [worker #1](https://github.com/vovalikessmoothy-png/opencode-gha-runner/issues/1), [integrator #140](https://github.com/trained-assist/trained-agent-architecture/issues/140).

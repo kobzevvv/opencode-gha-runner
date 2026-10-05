@@ -152,12 +152,12 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
   /** Куда идти, если кольцо пусто или недоступно. */
   const fallbackTarget: RingTarget = { repo: config.repo, token: config.githubToken };
 
-  /** Следующая цель кольца; падение кольца не должно ронять запуск. */
-  async function pickTarget(): Promise<RingTarget> {
+  /** Куда идти этому запуску; падение кольца не должно ронять запуск. */
+  async function pickTarget(runId: string): Promise<RingTarget> {
     try {
-      return (await ring.next()) ?? fallbackTarget;
+      return (await ring.next(runId)) ?? fallbackTarget;
     } catch (cause) {
-      log('ring pick failed', { error: cause instanceof Error ? cause.message : String(cause) });
+      log('ring pick failed', { runId, error: cause instanceof Error ? cause.message : String(cause) });
       return fallbackTarget;
     }
   }
@@ -198,8 +198,9 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     }
 
     // Цель кольца выбирается до записи рана: она часть записи, потому что отмена и
-    // поиск осиротевшего прогона обязаны идти именно в этот репозиторий.
-    const target = await pickTarget();
+    // поиск осиротевшего прогона обязаны идти именно в этот репозиторий. Выбор детерминирован
+    // по runId, поэтому повтор с тем же runId пришёл бы в ту же цель.
+    const target = await pickTarget(spec.runId);
     const github = clientFor(target);
 
     const claimToken = randomToken();

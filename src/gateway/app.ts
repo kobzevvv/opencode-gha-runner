@@ -312,7 +312,8 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
 
     log('run claimed', { runId: run.runId, outputs: spec.outputs?.length ?? 0 });
 
-    // `no-store` обязателен: ответ содержит `llmKey`, и любой прокси с кэшем — утечка.
+    // `no-store` обязателен: ответ содержит `llmKey` и токен публикации, и любой прокси
+    // с кэшем — утечка.
     return json(payload, 200, noStore());
   }
 

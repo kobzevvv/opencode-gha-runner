@@ -174,7 +174,7 @@ type Step<T> = { ok: true; value: T } | { ok: false; failure: Failure; exit: num
 interface PreparedWorkspace {
   identity: Identity;
   workspace: string;
-  artifactsToken: string;
+  artifactsToken: string; // токен публикации рана
   logFile: string;
 }
 
@@ -226,22 +226,37 @@ async function prepareWorkspace(options: {
   }
   logLine(`identity=${identity.name} uid=${identity.uid} enforced=${identity.enforced}`);
 
-  const artifactsToken = env.ARTIFACTS_TOKEN ?? '';
-  if (artifactsToken.length === 0) {
+  // Токен публикации — из запроса, а не из `ARTIFACTS_TOKEN` репозитория кольца.
+  // Джоба живёт в чужом репозитории, и токен кольца не имеет прав на репозиторий задачи:
+  // клон проходил (публичный репозиторий читается и так), а коммит выходов падал на
+  // `could not create branch`, и рапорт уходил как `completed artifacts=0`.
+  // `ARTIFACTS_TOKEN` остаётся запасным вариантом, когда воркер запускают вне кольца.
+  const publicationToken = spec.publicationToken ?? env.ARTIFACTS_TOKEN ?? '';
+  if (publicationToken.length === 0) {
+    return refuse(
+      failure(
+        'ARTIFACTS_TOKEN_UNSET',
+        'preflight',
+        'neither publicationToken nor ARTIFACTS_TOKEN is set: the runner cannot clone repository.fullName nor push outputs',
+      ),
+      RUNNER_EXIT.preflightRefused,
+    );
+  }
+  if (spec.repository.fullName === '') {
     return refuse(
       failure(
         'WORKER_INTERNAL',
         'preflight',
-        'ARTIFACTS_TOKEN is unset: the runner cannot clone repository.fullName nor push artifacts',
+        'repository.fullName is empty: there is nowhere to clone and nowhere to publish',
       ),
       RUNNER_EXIT.preflightRefused,
     );
   }
 
   try {
-    await cloneWorkspace(spec, workspace, artifactsToken, identity);
+    await cloneWorkspace(spec, workspace, publicationToken, identity);
   } catch (cause) {
-    const safeSummary = redact(cause instanceof Error ? cause.message : String(cause), artifactsToken);
+    const safeSummary = redact(cause instanceof Error ? cause.message : String(cause), publicationToken);
     logLine(`clone failed: ${safeSummary}`);
     return refuse(
       failure('WORKER_INTERNAL', 'engine', `clone of ${spec.repository.fullName} failed: ${safeSummary}`),
@@ -258,7 +273,7 @@ async function prepareWorkspace(options: {
     value: {
       identity,
       workspace,
-      artifactsToken,
+      artifactsToken: publicationToken,
       logFile: path.join(workspaceRoot, 'session-logs', runId, 'session.log'),
     },
   };
@@ -413,7 +428,14 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     // Локальная копия: в замыкании narrowing по `claim` не работает.
     const reportToken = claim.reportToken;
     const mcpSecrets = spec.mcpSecrets ?? {};
-    const secrets = [claim.llmKey, env.ARTIFACTS_TOKEN, ...Object.values(mcpSecrets)];
+    // Всё, что не должно попасть в вывод агента и в лог сессии: ключ LLM, токен публикации
+    // (он же `ARTIFACTS_TOKEN`, если запрос его не принёс) и секреты MCP.
+    const secrets = [
+      claim.llmKey,
+      spec.publicationToken,
+      env.ARTIFACTS_TOKEN,
+      ...Object.values(mcpSecrets),
+    ];
 
     logLine(`claimed job=${spec.jobId} timeout=${spec.limits.timeoutMs}ms outputs=${spec.outputs?.length ?? 0}`);
 
@@ -521,6 +543,10 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     });
     if (published.note) outcome.stderr += `\n${published.note}\n`;
 
+    // Что именно мешает назвать ран успешным — решает failureForOutcome: агент мог не
+    // создать объявленные файлы, либо они не доехали до репозитория.
+    const publicationFailure = published.note;
+
     // ── 6. лог сессии в GCS ───────────────────────────────────────────────────
     let logUrl = '';
     let logTruncated = false;
@@ -551,7 +577,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       repo: published.repo,
       logUrl,
       outputTruncated: outcome.outputTruncated || logTruncated,
-      failure: failureForOutcome(outcome.exitReason, collected.missing),
+      failure: failureForOutcome(outcome.exitReason, collected.missing, publicationFailure),
     });
     await report(reportUrl, claim.reportToken, result);
     return outcome.exitReason === 'completed' ? RUNNER_EXIT.ok : RUNNER_EXIT.agentFailed;
@@ -574,10 +600,13 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
   }
 }
 
-function failureForOutcome(
+export function failureForOutcome(
   exitReason: string,
   missingOutputs: string[],
+  publicationFailure: string | null,
 ): LaunchResult['failure'] | undefined {
+  // Движок молчит — отказывает финализация. Это разные исходы, и отказ движка важнее:
+  // клиенту нужен настоящий код отказа агента, а не «выходы не легли» поверх него.
   if (exitReason === 'timeout') {
     return failure('AGENT_TIMEOUT', 'runtime', 'agent exceeded limits.timeoutMs');
   }
@@ -589,6 +618,20 @@ function failureForOutcome(
       'AGENT_NONZERO_EXIT',
       'engine',
       missingOutputs.length > 0 ? `agent exited non-zero; missing outputs: ${missingOutputs.join(', ')}` : 'agent exited non-zero',
+    );
+  }
+  // Агент отработал, но результат не извлекаем: объявленные выходы либо не созданы,
+  // либо не закоммичены. Раньше это уходило как `completed artifacts=0`, и клиент получал
+  // успешный ран без единого файла — на живом замере 05.10.2026 так ушли 15 запусков
+  // из 16. Публикация объявленного — часть успеха, а не украшение.
+  if (publicationFailure !== null) {
+    return failure('ARTIFACTS_PUSH_FAILED', 'finalization', publicationFailure);
+  }
+  if (missingOutputs.length > 0) {
+    return failure(
+      'ARTIFACTS_PUSH_FAILED',
+      'finalization',
+      `declared outputs were not produced: ${missingOutputs.join(', ')}`,
     );
   }
   return undefined;

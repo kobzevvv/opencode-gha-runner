@@ -178,14 +178,70 @@ test('launch с некорректным телом — 400 со списком 
   assert.equal(((await response.json()) as { error: string }).error, 'invalid_launch_request');
 });
 
-test('в dispatch уходит только claim-токен: ни промпта, ни ключа', async () => {
+test('в dispatch уходит только claim-токен: ни промпта, ни ключа, ни токена публикации', async () => {
   const h = harness();
-  await h.fetch(launch(spec({ credentials: { llmKey: 'llm-key-should-not-leak' } })));
+  await h.fetch(
+    launch(
+      spec({
+        credentials: { llmKey: 'llm-key-should-not-leak' },
+        publicationToken: 'ghp_publication_should_not_leak',
+      }),
+    ),
+  );
   const serialized = JSON.stringify(h.dispatched);
   assert.deepEqual(Object.keys(h.dispatched[0]!).sort(), ['claimToken', 'runId']);
   assert.ok(!serialized.includes('llm-key-should-not-leak'));
   assert.ok(!serialized.includes('Сделай задачу'));
   assert.ok(!serialized.includes('github-token'));
+  // `workflow_dispatch` публичного репозитория показывает inputs в метаданных прогона
+  // и в логах, поэтому токен публикации в inputs — это утечка в мир. Он едет в claim.
+  assert.ok(!serialized.includes('ghp_publication_should_not_leak'));
+});
+
+test('claim отдаёт токен публикации, и он вычищается из записи рана после результата', async () => {
+  const h = harness();
+  await h.fetch(launch(spec({ publicationToken: 'ghp_publication-value-1' })));
+  const claimToken = h.dispatched[0]!.claimToken;
+
+  const response = await h.fetch(post('/v1/claim', { runId: RUN_ID }, claimToken));
+  const claim = (await response.json()) as { spec: { publicationToken?: string }; reportToken: string };
+  assert.equal(claim.spec.publicationToken, 'ghp_publication-value-1', 'джоба без токена не сможет опубликовать выходы');
+
+  await h.fetch(
+    post(
+      `/v1/runs/${RUN_ID}/report`,
+      {
+        status: 'failed',
+        exitCode: null,
+        exitSignal: null,
+        exitReason: 'preflight_refused',
+        stdout: '',
+        stderr: '',
+        answerSource: null,
+        durationMs: 1,
+        timedOut: false,
+        outputTruncated: false,
+        artifacts: [],
+        logUrl: '',
+        repo: { fullName: 'owner/name', branch: `agent-run/${RUN_ID}`, commit: '0'.repeat(40) },
+      },
+      claim.reportToken,
+    ),
+  );
+  const stored = await h.store.get(RUN_ID);
+  assert.equal(stored?.request.publicationToken, undefined, 'токен публикации обязан уйти из записи рана');
+});
+
+test('пустой токен публикации отвергается на входе, а не гоняет агента', async () => {
+  const h = harness();
+  const response = await h.fetch(launch(spec({ publicationToken: 'short' })));
+  assert.equal(response.status, 400);
+  const body = (await response.json()) as { issues: string[] };
+  assert.ok(
+    body.issues.some((issue) => issue.includes('publicationToken')),
+    `ожидали отказ по publicationToken, получили: ${body.issues.join('; ')}`,
+  );
+  assert.equal(h.dispatched.length, 0, 'диспатчить отвергнутый запрос нельзя');
 });
 
 test('дедупликация по operationId: повтор не поднимает второй ран', async () => {

@@ -77,6 +77,27 @@ Claimed run с zero-step GHA job остаётся nonterminal: claim может 
 workflow как infra failure. Source-ветка не изменяет существующий deployment;
 необходим отдельный согласованный cutover после recovery.
 
+### CLI graceful cancellation
+
+CLI ловит host SIGINT/SIGTERM, передаёт отмену в `runAgent`, посылает TERM всей
+detached process group и через 1 секунду эскалирует до KILL. Для enforced Unix
+identity используется bounded `sudo -n /bin/kill` с минимальным env. Прежний
+timeout grace остаётся 5 секунд. Результат отмены строится только после actual
+child `close`, с наблюдёнными code/signal; pre-spawn cancellation не создаёт exit
+proof. Listener/timer cleanup выполняется после lifecycle cleanup.
+
+Cancelled path сразу отправляет один report, без artifact publication/GCS ожидания;
+report ограничен 2 секундами и запрещает redirects. Потерянный ACK не приводит к
+повторному POST с другим результатом. Workflow entry использует `exec node`,
+чтобы [GitHub cancellation signals](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation)
+доходили до CLI, а не только до bash wrapper.
+
+Offline tests запускают настоящий CLI и process group, только с локальным synthetic
+claim/report server и stub clone; проверяют actual code 23, KILL при игнорировании
+TERM, завершение descendants, repeated signals, single report после lost ACK и
+отсутствие host credentials в agent env. Это не live GHA STOP acceptance и не
+основание включать CP stop gate без отдельного согласованного доказательства.
+
 ## Что проверено на настоящем прогоне
 
 Прогон `37214618976`, 04.10.2026 — полный цикл от `POST /v1/launch` до `LaunchResult`:

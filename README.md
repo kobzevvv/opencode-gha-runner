@@ -39,7 +39,7 @@ GitHub Actions: .github/workflows/run-agent.yml
 
 | Метод | Путь | Авторизация | Ответ |
 |---|---|---|---|
-| `POST` | `/v1/launch` | `Bearer WORKER_TOKEN` | `202` `{runId, status:"started", githubRunId, githubRunUrl, pollUrl}` |
+| `POST` | `/v1/launch` | `Bearer WORKER_TOKEN` | `202` `{runId, operationId, status:"accepted", statusUrl, resultUrl}` |
 | `GET` | `/v1/runs/{runId}` | `Bearer WORKER_TOKEN` | `202` пока нет результата, `200` с `LaunchResult` |
 | `POST` | `/v1/runs/{runId}/cancel` | `Bearer WORKER_TOKEN` | `200` `{runId, status, cancelled, reason}` |
 | `POST` | `/v1/claim` | `Bearer <claim_token>` | `200` `{runId, spec, llmKey, llmKeyEnvName, reportToken, reportUrl, agentBinary}` |
@@ -55,7 +55,7 @@ GitHub Actions: .github/workflows/run-agent.yml
 Прогон `37214618976`, 04.10.2026 — полный цикл от `POST /v1/launch` до `LaunchResult`:
 
 ```
-POST /v1/launch     → 202 started, githubRunId 37214618976
+POST /v1/launch     → 202 accepted, runId + statusUrl
 job claim            → spec с llmKey получен, claim-токен погашен
 identity             → ocrun-18eftw8 uid=1002 enforced=true
 agent config         → /home/ocrun-18eftw8/.config/opencode/opencode.json
@@ -70,6 +70,41 @@ GET /v1/runs/{runId} → 200, status=succeeded, exitReason=completed, failure=nu
 Что при этом **не** проверено: выгрузка лога в Google Storage (`LOG_UPLOAD=local`),
 потолки `maxOutputBytes`/`maxLogBytes` на настоящем ранне (покрыты тестами) и
 отмена живого GitHub-прогона (покрыта тестом на клиенте).
+
+### Кольцо — проверено на живых репозиториях
+
+Три публичных репозитория кольца, 05.10.2026. Ключевое: имя workflow и имя job в
+репозитории кольца равно имени репозитория, поэтому диспатч идёт в
+`.github/workflows/<имя-репы>.yml`, а не в общий `run-agent.yml`.
+
+```
+RING_TOKEN=… ./ring/provision.sh --gateway … \
+  my-first-org-here/opensource recruiting-me/runs opencode-tests/tests
+  → workflow opensource.yml / runs.yml / tests.yml, state=active
+  → ARTIFACTS_TOKEN + GATEWAY_URL + LOG_UPLOAD + AGENT_ARGS в каждом
+
+RING_TARGETS=[{repo,token}×3] → wrangler secret put → wrangler deploy
+```
+
+Три прогона по кругу, каждый в своём репозитории:
+
+```
+run_ring1791169365 → opencode-tests/tests        wf=tests.yml      exitReason=completed
+run_ring1791169509 → recruiting-me/runs          wf=runs.yml       exitReason=completed
+run_ring1791169712 → my-first-org-here/opensource wf=opensource.yml exitReason=cancelled
+```
+
+`run_ring1791169509` — полный цикл с артефактом: `report.md` в ветку
+`agent-run/<runId>`, commit `ee5a4e8`, sha256 совпадает с тем, что вернул воркер.
+`run_ring1791169712` — отмена через `POST /v1/runs/{runId}/cancel` дошла до того же
+репозитория, куда ушёл ран (round-robin к этому моменту уже выбрал следующий), и
+вернула `exitReason=cancelled`.
+
+Ограничение, которое видно только на живом прогоне: `ARTIFACTS_TOKEN` репозитория кольца
+обязан уметь писать в `repository.fullName` из запроса. Первый прогон ушёл в
+`opencode-tests/tests`, а артефакты просили в `recruiting-me/runs` — пуш упал с
+`could not create branch`, агент при этом отработал и вернул `exitReason=completed`
+с пустым списком артефактов.
 
 ### Remote MCP — проверено сквозняком
 
@@ -342,8 +377,8 @@ npx wrangler secret put GITHUB_TOKEN      # токен для workflow_dispatch 
 npx wrangler deploy
 ```
 
-`PUBLIC_BASE_URL` обязан совпадать с публичным адресом шлюза: он попадает в `pollUrl`
-и `reportUrl`, и джоба идёт именно туда.
+`PUBLIC_BASE_URL` обязан совпадать с публичным адресом шлюза: он попадает в `statusUrl`
+и `resultUrl` квитанции, и джоба идёт именно туда.
 
 Для GCS понадобится бакет и WIF-провайдер; лог кладётся `publicRead`, иначе ссылка из
 `logUrl` отдаёт 403.
@@ -353,7 +388,7 @@ npx wrangler deploy
 Контракт в issue помечен как драфт, а GHA накладывает ограничения, которых в нём нет.
 Каждое отклонение — осознанное:
 
-1. **`launch` отвечает `202 started`, а не финальным `LaunchResult`.** Холодный старт
+1. **`launch` отвечает `202 accepted` (квитанция), а не финальным `LaunchResult`.** Холодный старт
    GHA-джобы — 15–45 с (замерено в `docs/GITHUB-ACTIONS-CAPABILITY.md` нашего API), бывает
    очередь. Финальный результат наш API забирает через `GET /v1/runs/{runId}`. Иначе
    `launch` упирался бы в сетевой таймаут клиента.

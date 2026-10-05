@@ -220,7 +220,18 @@ LLM-пул): `GET /zen/ring/payload` отдаёт строки с токенам
 исправление в раннере доезжает до всех сразу, без перепровижина.
 
 Кроме файла, в репозитории кольца нужны `ARTIFACTS_TOKEN` (secret) и переменные
-`GATEWAY_URL`, `LOG_UPLOAD`, `GCS_LOG_BUCKET`, `AGENT_ARGS`.
+`GATEWAY_URL`, `LOG_UPLOAD`, `GCS_LOG_BUCKET`, `AGENT_ARGS`. Всё это ставит
+`ring/provision.sh` одной командой:
+
+```bash
+./ring/provision.sh \
+  --gateway https://opencode-gha-runner-gateway.skillset-apply.workers.dev \
+  --artifacts-token ghp_… \
+  llm-tests/llm-tests personalexperiments/tests typeform-tests/typeform-tests
+```
+
+Скрипт идемпотентен и не берёт токен из argv (`ps` виден всем). Токену нужны права
+`workflow` на целевые репозитории.
 
 ## Кто повторяет: ретрай на стороне API, идемпотентность на нашей
 
@@ -386,6 +397,7 @@ npx wrangler deploy
 | `src/gateway/store.ts` | раны в памяти и в Cloudflare KV |
 | `src/gateway/ring.ts` | кольцо репозиториев: разбор, кэш, round-robin |
 | `ring/run-agent.yml` | workflow-шаблон для репозитория кольца |
+| `ring/provision.sh` | провижн репозитория кольца: workflow + секрет + переменные |
 | `src/gateway/github.ts` | `workflow_dispatch`, поиск `run_id`, отмена |
 | `src/gateway/node-server.ts` | `node:http`-транспорт для локального прогона |
 | `src/worker.ts` | Cloudflare Worker: тот же gateway + KV binding |

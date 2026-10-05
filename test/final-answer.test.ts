@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { failure, type LaunchRequest } from '../src/contracts.js';
 import { agentOutputFormat, extractAnswer, extractAssistantText } from '../src/runner/answer.js';
 import { collectArtifacts, GitHubRepoApi, NULL_SHA } from '../src/runner/artifacts.js';
-import { buildAgentPrompt, declaredOutputFailure } from '../src/runner/finalization.js';
+import { buildAgentArgs, buildAgentPrompt, declaredOutputFailure } from '../src/runner/finalization.js';
 import { buildLaunchResult, publishArtifacts } from '../src/runner/main.js';
 
 const frame = (type: string, messageID: string, part: Record<string, unknown>) => JSON.stringify({ type, timestamp: 100, sessionID: 'session-main', part: { sessionID: 'session-main', messageID, ...part } });
@@ -73,6 +73,25 @@ test('plain legacy output is allowed only in plain mode; JSON frames never fall 
 });
 
 const output = { path: 'result.csv', name: 'result.csv', mime: 'text/csv' };
+
+test('host JSON selection places format after run and preserves model flags and multiline prompt', () => {
+  const extraArgs = ['--model', 'ladder/existing-model', '--format=default'];
+  const prompt = 'Original goal\n  Preserve instructions';
+  const args = buildAgentArgs(extraArgs, prompt, [output], 'json');
+  assert.deepEqual(args.slice(0, -1), [...extraArgs, 'run', '--format', 'json']);
+  assert.equal(args.at(-1), buildAgentPrompt(prompt, [output]));
+  assert.equal(agentOutputFormat(args.slice(0, -1)), 'json');
+  assert.deepEqual(extraArgs, ['--model', 'ladder/existing-model', '--format=default']);
+  assert.equal(agentOutputFormat(['--format', 'json', '--format=default']), 'plain');
+});
+
+test('unset host output format leaves legacy args unchanged and prompt is not parsed as a flag', () => {
+  for (const format of [undefined, '', 'plain', 'unsupported']) {
+    const args = buildAgentArgs(['--model', 'ladder/existing-model'], '--format=json', [], format);
+    assert.deepEqual(args, ['--model', 'ladder/existing-model', 'run', '--format=json']);
+    assert.equal(agentOutputFormat(args.slice(0, -1)), 'plain');
+  }
+});
 const artifact = { path: 'artifacts/result.csv', name: 'result.csv', mime: 'text/csv', size: 12, sha256: 'b'.repeat(64) };
 const successful = { runId: 'run-final', outcome: { exitCode: 0, exitSignal: null, exitReason: 'completed' as const, stdout: '', stderr: '', durationMs: 1, timedOut: false, outputTruncated: false }, answer: { text: 'done', source: 'agent_file' as const }, artifacts: [artifact], repo: { fullName: 'owner/repo', branch: 'agent-run/run-final', commit: 'a'.repeat(40) }, logUrl: '', outputTruncated: false, outputs: [output] };
 

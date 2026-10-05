@@ -76,6 +76,7 @@ jobs:
           GCS_LOG_BUCKET: ${{ vars.GCS_LOG_BUCKET }}
           WORKSPACE_ROOT: ${{ runner.temp }}
           AGENT_ARGS: ${{ vars.AGENT_ARGS }}
+          AGENT_OUTPUT_FORMAT: ${{ github.ref_name == 'integration/final-answer-v1-20261005' && 'json' || '' }}
           AGENT_CONFIG: ${{ vars.AGENT_CONFIG }}
           # Passwordless sudo — штатное свойство GitHub-hosted раннера, поэтому
           # per_run_unix_identity ставится по-настоящему, а не имитируется.

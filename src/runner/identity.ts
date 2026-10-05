@@ -172,7 +172,7 @@ export interface LaunchIdentityArgs {
   env: Record<string, string>;
 }
 
-export const MINIMAL_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+export const MINIMAL_PATH = '/usr/sbin:/usr/bin:/sbin:/bin';
 
 /**
  * Абсолютный путь к бинарю агента.

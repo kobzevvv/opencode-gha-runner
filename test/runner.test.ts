@@ -16,7 +16,7 @@ import { failure } from '../src/contracts.js';
 import { collectArtifacts } from '../src/runner/artifacts.js';
 import { buildLaunchResult } from '../src/runner/main.js';
 import { capOutput, resolveAgentEnv, runAgent } from '../src/runner/exec.js';
-import { buildChildPath, buildLaunchCommand, ensureTraversable, identityName, parentDirs, type Identity } from '../src/runner/identity.js';
+import { buildChildPath, buildLaunchCommand, ensureTraversable, identityName, MINIMAL_PATH, parentDirs, type Identity } from '../src/runner/identity.js';
 
 const baseIdentity: Identity = {
   name: 'ocrun-abc',
@@ -131,7 +131,14 @@ test('без разрешённого PATH подставляется миним
   const assignments = argv.slice(argv.indexOf('-i') + 1, argv.indexOf('/opt/hostedtoolcache/node/20.19.0/x64/bin/opencode'));
   assert.equal(assignments[0], `PATH=${buildChildPath(undefined, '/opt/hostedtoolcache/node/20.19.0/x64/bin')}`);
   assert.ok(assignments[0]!.includes('/opt/hostedtoolcache/node/20.19.0/x64/bin'));
-  assert.ok(assignments[0]!.includes('/usr/local/bin'));
+  assert.ok(!assignments[0]!.includes('/usr/local/bin'));
+  assert.ok(!assignments[0]!.includes('/usr/local/sbin'));
+});
+
+test('host identity helpers resolve commands only through trusted system paths', () => {
+  assert.equal(MINIMAL_PATH, '/usr/sbin:/usr/bin:/sbin:/bin');
+  const childPath = buildChildPath(undefined, '/opt/native-cli-release/bin');
+  assert.equal(childPath, '/opt/native-cli-release/bin:/usr/sbin:/usr/bin:/sbin:/bin');
 });
 
 test('без изоляции запуск идёт напрямую, но всё равно через env -i', () => {

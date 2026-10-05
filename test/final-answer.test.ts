@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { failure } from '../src/contracts.js';
+import { failure, type LaunchRequest } from '../src/contracts.js';
 import { agentOutputFormat, extractAnswer, extractAssistantText } from '../src/runner/answer.js';
-import { GitHubRepoApi, NULL_SHA } from '../src/runner/artifacts.js';
+import { collectArtifacts, GitHubRepoApi, NULL_SHA } from '../src/runner/artifacts.js';
 import { buildAgentPrompt, declaredOutputFailure } from '../src/runner/finalization.js';
-import { buildLaunchResult } from '../src/runner/main.js';
+import { buildLaunchResult, publishArtifacts } from '../src/runner/main.js';
 
 const frame = (type: string, messageID: string, part: Record<string, unknown>) => JSON.stringify({ type, timestamp: 100, sessionID: 'session-main', part: { sessionID: 'session-main', messageID, ...part } });
 const text = (messageID: string, value: string, id = 'part-text') => frame('text', messageID, { type: 'text', id, text: value, time: { start: 1, end: 2 } });
@@ -122,3 +123,45 @@ test('GitHub branch failure exposes operation and HTTP status, never response bo
   }) as typeof fetch });
   await assert.rejects(api.pushFiles({ branch: 'agent-run/run-final', commitMessage: 'result', files: [{ path: 'artifacts/result.csv', content: Buffer.from('result') }] }), { message: 'GitHub branch creation HTTP 403' });
 });
+
+for (const replacement of ['symlink', 'rewrite', 'delete'] as const) {
+  test(`publication preserves collected bytes and manifest hash after output ${replacement}`, async (context) => {
+    const root = await mkdtemp(path.join(tmpdir(), 'worker-publication-'));
+    context.after(() => rm(root, { recursive: true, force: true }));
+    const workspace = path.join(root, 'workspace');
+    await mkdir(workspace);
+    const outputPath = path.join(workspace, output.path);
+    const original = Buffer.from('category,total\nfood,150\ntravel,275\n');
+    await writeFile(outputPath, original);
+    const collected = await collectArtifacts(workspace, [output]);
+    await rm(outputPath);
+    if (replacement === 'symlink') {
+      const outside = path.join(root, 'outside.txt');
+      await writeFile(outside, 'outside-host-secret-must-not-publish');
+      await symlink(outside, outputPath);
+    } else if (replacement === 'rewrite') {
+      await writeFile(outputPath, 'different bytes after collection');
+    }
+    let uploaded: Array<{ path: string; content: Buffer }> = [];
+    context.mock.method(GitHubRepoApi.prototype, 'pushFiles', async (options: { branch: string; files: typeof uploaded }) => {
+      uploaded = options.files;
+      return { fullName: 'owner/repo', branch: options.branch, commit: 'a'.repeat(40), pushed: options.files.map((file) => file.path) };
+    });
+    const spec: LaunchRequest = {
+      runId: 'run-snapshot', jobId: 'job-1', userTaskId: 'task-1', profileId: 'profile-1', conversationId: 'conv-1', operationId: 'op-1', ownerGeneration: 1,
+      engine: { name: 'dynamic-ip-azure-agent-run', adapterVersion: '1' }, input: { inlinePrompt: 'Produce CSV' }, cwd: workspace,
+      envAllowlist: [], env: {}, limits: { timeoutMs: 300000, maxOutputBytes: 1024, maxLogBytes: 1024 },
+      repository: { fullName: 'owner/repo', branch: 'agent-run/run-snapshot' }, resultUrl: 'https://example.test/result',
+      isolation: { mode: 'per_run_unix_identity' }, outputs: [output],
+    };
+    const published = await publishArtifacts({ spec, runId: spec.runId, workspace, token: 'fixture-token', collected, outcome: successful.outcome, startedAt: new Date(), sessionLog: { append() {} } });
+    assert.equal(published.note, null);
+    const content = uploaded.find((file) => file.path === 'artifacts/result.csv')!.content;
+    assert.deepEqual(content, original);
+    assert.equal(createHash('sha256').update(content).digest('hex'), published.artifactRefs[0]!.sha256);
+    assert.equal(content.length, published.artifactRefs[0]!.size);
+    const manifest = JSON.parse(uploaded.find((file) => file.path === 'artifacts/run-manifest.json')!.content.toString());
+    assert.deepEqual(manifest.artifacts, published.artifactRefs);
+    assert.deepEqual(manifest.missingOutputs, []);
+  });
+}

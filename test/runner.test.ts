@@ -106,7 +106,7 @@ test('под изоляцией запуск идёт через sudo -u, а н�
   // Регрессия: `setpriv --reuid` требует CAP_SETUID, которого у процесса раннера
   // нет — есть только passwordless sudo. Прямой вызов падал с
   // `setresuid failed: Operation not permitted`, и изоляция не ставилась вообще.
-  const { command, argv } = buildLaunchCommand({
+  const { command, argv, stdin } = buildLaunchCommand({
     identity: { ...baseIdentity, enforced: true },
     binary: '/usr/local/bin/opencode',
     argv: ['run', 'промпт'],
@@ -116,23 +116,24 @@ test('под изоляцией запуск идёт через sudo -u, а н�
   assert.deepEqual(argv.slice(0, 3), ['-u', 'ocrun-abc', '--']);
   // Каталог бинаря обязан быть в PATH агента: иначе opencode не найдёт node.
   const envIndex = argv.indexOf('env');
-  const binaryIndex = argv.indexOf('/usr/local/bin/opencode');
-  const assignments = argv.slice(envIndex + 1, binaryIndex);
-  assert.deepEqual(assignments, ['-i', `PATH=${buildChildPath('/usr/bin', '/usr/local/bin')}`]);
+  assert.equal(argv[envIndex + 1], '-i');
+  assert.equal(argv[envIndex + 2], process.execPath);
+  assert.ok(argv[envIndex + 3]!.endsWith('/private-launch.js'));
+  assert.equal(JSON.parse(stdin).env.PATH, buildChildPath('/usr/bin', '/usr/local/bin'));
 });
 
 test('без разрешённого PATH подставляется минимальный плюс каталог бинаря', () => {
-  const { argv } = buildLaunchCommand({
+  const { stdin } = buildLaunchCommand({
     identity: baseIdentity,
     binary: '/opt/hostedtoolcache/node/20.19.0/x64/bin/opencode',
     argv: ['run', 'промпт'],
     env: {},
   });
-  const assignments = argv.slice(argv.indexOf('-i') + 1, argv.indexOf('/opt/hostedtoolcache/node/20.19.0/x64/bin/opencode'));
-  assert.equal(assignments[0], `PATH=${buildChildPath(undefined, '/opt/hostedtoolcache/node/20.19.0/x64/bin')}`);
-  assert.ok(assignments[0]!.includes('/opt/hostedtoolcache/node/20.19.0/x64/bin'));
-  assert.ok(!assignments[0]!.includes('/usr/local/bin'));
-  assert.ok(!assignments[0]!.includes('/usr/local/sbin'));
+  const childPath = JSON.parse(stdin).env.PATH;
+  assert.equal(childPath, buildChildPath(undefined, '/opt/hostedtoolcache/node/20.19.0/x64/bin'));
+  assert.ok(childPath.includes('/opt/hostedtoolcache/node/20.19.0/x64/bin'));
+  assert.ok(!childPath.includes('/usr/local/bin'));
+  assert.ok(!childPath.includes('/usr/local/sbin'));
 });
 
 test('host identity helpers resolve commands only through trusted system paths', () => {

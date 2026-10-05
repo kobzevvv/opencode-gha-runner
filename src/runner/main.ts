@@ -658,7 +658,13 @@ export function failureForOutcome(
  * Ответ агента: сначала файл (`.agent/answer.txt` или `answer.txt`), иначе хвост stdout.
  * Файл приоритетнее — stdout может быть перемешан логами установки пакетов.
  */
-function extractAnswer(
+/**
+ * Ответ агента.
+ *
+ * Порядок источников: файл, потом stdout. Файл приоритетнее — stdout может быть перемешан
+ * логами установки пакетов.
+ */
+export function extractAnswer(
   workspace: string,
   stdout: string,
 ): { text?: string; source: 'engine_stdout' | 'agent_file' | null } {
@@ -667,11 +673,63 @@ function extractAnswer(
       const buffer = readFileSync(path.resolve(workspace, candidate));
       if (buffer.length > 0) return { text: buffer.toString('utf8').trim(), source: 'agent_file' };
     } catch {
-      // Нет файла — пробуем следующий кандидата.
+      // Нет файла — пробуем следующего кандидата.
     }
   }
+  // `opencode run --format json` печатает поток JSON-событий, по одному объекту в строке
+  // (`packages/opencode/src/cli/cmd/run.ts`, `emit()`). Ответ — последнее событие
+  // `type: "text"`: промежуточные текстовые части и `tool_use` в него не входят.
+  //
+  // Без этой ветки клиент получал бы в `answer` весь поток событий. Сейчас это латентно:
+  // `AGENT_ARGS` у ранов идёт как `--pure -m ladder/free`, а JSON выдаёт только явный
+  // `--format json`. Но `AGENT_ARGS` — это переменная репозитория, и её смена сделала бы
+  // ответ нечитаемым молча, поэтому разбираем оба формата.
+  const fromJson = answerFromJsonEvents(stdout);
+  if (fromJson !== undefined) return { text: fromJson, source: 'engine_stdout' };
+
   const trimmed = stdout.trim();
   return trimmed.length > 0 ? { text: trimmed, source: 'engine_stdout' } : { source: null };
+}
+
+/**
+ * Финальный текст из потока JSON-событий opencode. `undefined` — stdout не JSON-поток,
+ * и разбирать его нечего.
+ *
+ * Возвращает только если нашлось хотя бы одно текстовое событие: поток, в котором JSON
+ * есть, а текста нет, — это не «ответ пустой», а отсутствие ответа.
+ */
+export function answerFromJsonEvents(stdout: string): string | undefined {
+  const lines = stdout.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+  if (lines.length === 0) return undefined;
+
+  const events: Array<{ type?: unknown; part?: { text?: unknown } }> = [];
+  for (const line of lines) {
+    let event: { type?: unknown; part?: { text?: unknown } };
+    try {
+      event = JSON.parse(line) as typeof event;
+    } catch {
+      // Строка не разобралась. В потоке событий её быть не должно, а если встретилась —
+      // это вывод вперемешку с JSON: пропускаем, а не роняем ран.
+      continue;
+    }
+    if (event !== null && typeof event === 'object' && typeof event.type === 'string') events.push(event);
+  }
+  // Решаем по всему выводу, а не по первой строке: opencode вправе напечатать
+  // предупреждение раньше первого события, и проверка «первая строка — JSON» тогда
+  // отдала бы клиенту весь поток событий вместо ответа — ровно тот дефект, который
+  // здесь и чинится.
+  if (events.length === 0) return undefined;
+
+  const texts: string[] = [];
+  for (const event of events) {
+    if (event.type !== 'text') continue;
+    const text = event.part?.text;
+    if (typeof text === 'string' && text.trim().length > 0) texts.push(text.trim());
+  }
+  if (texts.length === 0) return undefined;
+  // Последнее текстовое событие — финальный ответ: opencode отдаёт `text` только для
+  // завершённых частей (`part.time?.end`), а части по ходу работы закрываются раньше.
+  return texts[texts.length - 1]!;
 }
 
 const invokedDirectly =

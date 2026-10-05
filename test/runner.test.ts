@@ -16,7 +16,7 @@ import { failure, isRetryableCode } from '../src/contracts.js';
 import { validLaunchRequest } from './contracts.test.js';
 import type { LaunchRequest } from '../src/contracts.js';
 import { collectArtifacts } from '../src/runner/artifacts.js';
-import { buildLaunchResult, failureForOutcome, publishArtifacts, SessionLog } from '../src/runner/main.js';
+import { answerFromJsonEvents, buildLaunchResult, extractAnswer, failureForOutcome, publishArtifacts, SessionLog } from '../src/runner/main.js';
 import { capOutput, resolveAgentEnv, runAgent } from '../src/runner/exec.js';
 import { buildChildPath, buildLaunchCommand, ensureTraversable, identityName, parentDirs, type Identity } from '../src/runner/identity.js';
 
@@ -710,5 +710,71 @@ test('пустое тело на 404 — это «ветки нет», а не �
 
   assert.equal(published.note, null, 'пустое тело на 404 не должно ронять публикацию');
   assert.equal(published.repo.baseRef, 'main');
+  await rm(dir, { recursive: true, force: true });
+});
+
+// ── ответ агента из потока JSON-событий ───────────────────────────────────────
+
+/**
+ * Фикстура по реальной схеме opencode (`packages/opencode/src/cli/cmd/run.ts`, `emit()`):
+ * JSON-объект на строку, поля `type`/`timestamp`/`sessionID`, текст — в `part.text`.
+ * `text` приходит только для завершённых частей (`part.time?.end`), поэтому
+ * последнее событие `text` — финальный ответ.
+ */
+const jsonStream = [
+  JSON.stringify({ type: 'step_start', timestamp: 1, sessionID: 'ses_1', part: { id: 'prt_1', type: 'step-start' } }),
+  JSON.stringify({ type: 'reasoning', timestamp: 2, sessionID: 'ses_1', part: { id: 'prt_2', type: 'reasoning', text: 'размышляю' } }),
+  JSON.stringify({ type: 'tool_use', timestamp: 3, sessionID: 'ses_1', part: { id: 'prt_3', type: 'tool', tool: 'bash', state: { status: 'completed' } } }),
+  JSON.stringify({ type: 'text', timestamp: 4, sessionID: 'ses_1', part: { id: 'prt_4', type: 'text', text: 'Пишу файл.', time: { end: 5 } } }),
+  JSON.stringify({ type: 'tool_use', timestamp: 5, sessionID: 'ses_1', part: { id: 'prt_5', type: 'tool', tool: 'write', state: { status: 'completed' } } }),
+  JSON.stringify({ type: 'step_finish', timestamp: 6, sessionID: 'ses_1', part: { id: 'prt_6', type: 'step-finish' } }),
+  JSON.stringify({ type: 'text', timestamp: 7, sessionID: 'ses_1', part: { id: 'prt_7', type: 'text', text: 'Готово: report.md с одной строкой.', time: { end: 8 } } }),
+].join('\n');
+
+test('JSON-поток: в ответ идёт последнее текстовое событие, а не весь поток', () => {
+  assert.equal(answerFromJsonEvents(jsonStream), 'Готово: report.md с одной строкой.');
+});
+
+test('обычный stdout агента разбирается как раньше — он не JSON', () => {
+  assert.equal(answerFromJsonEvents('Готово: `report.md` с одной строкой.'), undefined);
+});
+
+test('JSON без текстовых событий — это отсутствие ответа, а не пустой ответ', () => {
+  const onlyTools = [
+    JSON.stringify({ type: 'step_start', timestamp: 1, sessionID: 'ses_1', part: { id: 'prt_1', type: 'step-start' } }),
+    JSON.stringify({ type: 'tool_use', timestamp: 2, sessionID: 'ses_1', part: { id: 'prt_2', type: 'tool', tool: 'bash' } }),
+  ].join('\n');
+  assert.equal(answerFromJsonEvents(onlyTools), undefined);
+});
+
+test('пустое текстовое событие не становится ответом', () => {
+  const blank = [
+    JSON.stringify({ type: 'text', timestamp: 1, sessionID: 'ses_1', part: { id: 'prt_1', type: 'text', text: '   ' } }),
+  ].join('\n');
+  assert.equal(answerFromJsonEvents(blank), undefined);
+});
+
+test('строка вывода агента вперемешку с JSON не роняет разбор', () => {
+  // Поток событий идёт в stdout, а установка пакетов пишет рядом: строка, которая не
+  // разбирается, пропускается, а не обрушивает весь ран.
+  const mixed = `added 1 package\n${JSON.stringify({ type: 'text', timestamp: 1, sessionID: 'ses_1', part: { id: 'prt_1', type: 'text', text: 'Ответ.', time: { end: 2 } } })}`;
+  assert.equal(answerFromJsonEvents(mixed), 'Ответ.');
+});
+
+test('extractAnswer: JSON-поток не уезжает в ответ целиком', async () => {
+  // Сквозной тест: раньше ответом становился весь stdout, и при `--format json` клиент
+  // получал поток событий вместо текста ассистента.
+  const dir = await mkdtemp(path.join(tmpdir(), 'oga-answer-'));
+  const answer = extractAnswer(dir, jsonStream);
+  assert.equal(answer.source, 'engine_stdout');
+  assert.equal(answer.text, 'Готово: report.md с одной строкой.');
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('extractAnswer: обычный текст агента отдаётся как раньше', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oga-answer-plain-'));
+  const answer = extractAnswer(dir, 'Готово: `report.md` с одной строкой.');
+  assert.equal(answer.source, 'engine_stdout');
+  assert.equal(answer.text, 'Готово: `report.md` с одной строкой.');
   await rm(dir, { recursive: true, force: true });
 });

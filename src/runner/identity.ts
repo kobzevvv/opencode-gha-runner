@@ -15,6 +15,7 @@
 
 import { execFile, spawn } from 'node:child_process';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
@@ -220,13 +221,14 @@ export function buildChildPath(allowlisted: string | undefined, binaryDir: strin
  * `GITHUB_TOKEN` джобы и `ACTIONS_RUNTIME_TOKEN`), что прямо нарушает требование
  * issue #73, п.4. Дальше — только явно разрешённые имена плюс гарантированный PATH.
  */
-export function buildLaunchCommand(args: LaunchIdentityArgs): { command: string; argv: string[] } {
+export function buildLaunchCommand(args: LaunchIdentityArgs): { command: string; argv: string[]; stdin: string } {
   const env = { ...args.env, PATH: buildChildPath(args.env['PATH'], path.dirname(args.binary)) };
-  const assignments = Object.entries(env).map(([name, value]) => `${name}=${value}`);
-  const inner = ['-i', ...assignments, args.binary, ...args.argv];
+  const stdin = JSON.stringify({ binary: args.binary, argv: args.argv, env });
+  if (Buffer.byteLength(stdin) > 1048576) throw new Error('private launch payload exceeds limit');
+  const inner = ['-i', process.execPath, fileURLToPath(new URL('./private-launch.js', import.meta.url))];
 
   if (!args.identity.enforced) {
-    return { command: 'env', argv: inner };
+    return { command: 'env', argv: inner, stdin };
   }
   // Через `sudo -u`, а не через `setpriv --reuid`: setpriv меняет uid только
   // при наличии CAP_SETUID, а у процесса раннера его нет — он получает только
@@ -235,6 +237,7 @@ export function buildLaunchCommand(args: LaunchIdentityArgs): { command: string;
   return {
     command: 'sudo',
     argv: ['-u', args.identity.name, '--', 'env', ...inner],
+    stdin,
   };
 }
 
@@ -282,8 +285,10 @@ export function runUnderIdentity(
     const child = spawn(launch.command, launch.argv, {
       cwd: identity.workspace,
       env: { PATH: MINIMAL_PATH },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
+    child.stdin?.on('error', () => {});
+    child.stdin?.end(launch.stdin);
     let stdout = '';
     let stderr = '';
     child.stdout?.on('data', (chunk: Buffer) => {

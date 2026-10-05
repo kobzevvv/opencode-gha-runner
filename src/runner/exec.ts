@@ -67,7 +67,7 @@ export async function runAgent(options: ExecOptions): Promise<ExecOutcome> {
   // Бинарь резолвится заранее: у агента будет `env -i` с минимальным PATH, а opencode
   // в GHA лежит в tool cache, которого в этом наборе нет.
   const binary = (await resolveBinaryAbsolute(options.binary)) ?? options.binary;
-  const { command, argv } = buildLaunchCommand({
+  const { command, argv, stdin } = buildLaunchCommand({
     identity: options.identity,
     binary,
     argv: options.argv,
@@ -80,8 +80,10 @@ export async function runAgent(options: ExecOptions): Promise<ExecOutcome> {
     // для агента, задаётся через `env -i` внутри buildLaunchCommand.
     env: { PATH: MINIMAL_PATH },
     detached: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
+  child.stdin?.on('error', () => {});
+  child.stdin?.end(stdin);
 
   options.onSpawn?.(child);
 

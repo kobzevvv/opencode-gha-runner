@@ -13,8 +13,10 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { AGENT_CONFIG_TEMPLATE, installAgentConfig, renderAgentConfig } from '../src/runner/agent-config.js';
 import { failure, isRetryableCode } from '../src/contracts.js';
+import { validLaunchRequest } from './contracts.test.js';
+import type { LaunchRequest } from '../src/contracts.js';
 import { collectArtifacts } from '../src/runner/artifacts.js';
-import { buildLaunchResult, failureForOutcome } from '../src/runner/main.js';
+import { buildLaunchResult, failureForOutcome, publishArtifacts, SessionLog } from '../src/runner/main.js';
 import { capOutput, resolveAgentEnv, runAgent } from '../src/runner/exec.js';
 import { buildChildPath, buildLaunchCommand, ensureTraversable, identityName, parentDirs, type Identity } from '../src/runner/identity.js';
 
@@ -610,4 +612,103 @@ test('ARTIFACTS_PUSH_FAILED не retryable: повтор с тем же токе
   assert.equal(isRetryableCode('AGENT_TIMEOUT'), true);
   assert.equal(isRetryableCode('AGENT_CRASH'), true);
   assert.equal(isRetryableCode('WORKER_INTERNAL'), true);
+});
+
+// ── baseRef: адрес мержа ─────────────────────────────────────────────────────
+
+/** Мок GitHub API: отвечает на те вызовы, которые делает публикация. */
+function githubApiMock(calls: string[]): typeof fetch {
+  let seenRunBranch = false;
+  return (async (url: string | URL, init?: RequestInit) => {
+    const target = String(url);
+    calls.push(init?.method ?? 'GET');
+    const body = (payload: unknown): Response =>
+      new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } });
+    // GitHub отдаёт JSON даже на 404 — тест повторяет это, а не пустое тело.
+    const notFound = new Response(JSON.stringify({ message: 'Not Found' }), {
+      status: 404,
+      headers: { 'content-type': 'application/json' },
+    });
+    if (target.endsWith('/repos/owner/name')) return body({ default_branch: 'main' });
+    if (target.includes('/git/ref/heads/main')) return body({ object: { sha: 'base-sha-0000000000000000000000000000000000' } });
+    if (target.endsWith('/git/refs')) return new Response('', { status: 201 });
+    if (target.includes('/git/ref/heads/agent-run/run_1')) {
+      // Первый запрос — ветки рана ещё нет, второй (после createBranch) — уже есть.
+      if (!seenRunBranch) {
+        seenRunBranch = true;
+        return notFound;
+      }
+      return body({ object: { sha: 'run-sha-1111111111111111111111111111111111' } });
+    }
+    return new Response('', { status: 200 });
+  }) as unknown as typeof fetch;
+}
+
+test('baseRef доезжает в repo: без него клиент получает адрес ветки вместо адреса мержа', async () => {
+  // На живой приёмке 05.10.2026 ветки с артефактами появились, но `baseRef` в ответе
+  // отсутствовал: `mergeUrl` сводился к адресу ветки, и «куда мержить» было ручным поиском.
+  const dir = await mkdtemp(path.join(tmpdir(), 'oga-publish-'));
+  const log = new SessionLog();
+  await log.open(path.join(dir, 'session.log'), '# run\n');
+
+  const calls: string[] = [];
+  const published = await publishArtifacts({
+    spec: validLaunchRequest({ runId: 'run_1', repository: { fullName: 'owner/name', branch: 'agent-run/run_1' } }) as unknown as LaunchRequest,
+    runId: 'run_1',
+    workspace: dir,
+    token: 'ghp_test_token_value',
+    collected: { artifacts: [], missing: [], undeclared: [] },
+    outcome: { exitCode: 0, exitSignal: null, exitReason: 'completed', stdout: '', stderr: '', durationMs: 1, timedOut: false, outputTruncated: false },
+    startedAt: new Date(),
+    sessionLog: log,
+    fetchImpl: githubApiMock(calls),
+  });
+
+  assert.equal(published.repo.baseRef, 'main', 'baseRef обязан доехать: по нему наше API строит /compare/main...agent-run/<runId>');
+  assert.equal(published.repo.commit, 'run-sha-1111111111111111111111111111111111');
+  assert.equal(published.note, null);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('пустое тело на 404 — это «ветки нет», а не падение публикации', async () => {
+  // Прокси и обрыв сети дают пустое тело, где GitHub обычно отдаёт JSON. Раньше `branchSha`
+  // падал на `ref.data.object`, и публикация рана обрывалась вместо «создадим ветку».
+  let seenRunBranch = false;
+  const emptyBody404 = async (url: string | URL): Promise<Response> => {
+    const target = String(url);
+    if (target.endsWith('/repos/owner/name')) {
+      return new Response(JSON.stringify({ default_branch: 'main' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (target.includes('/git/ref/heads/main')) {
+      return new Response(JSON.stringify({ object: { sha: 'base-sha-0000000000000000000000000000000000' } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (target.endsWith('/git/refs')) return new Response('', { status: 201 });
+    if (target.includes('/git/ref/heads/agent-run/run_1')) {
+      if (!seenRunBranch) {
+        seenRunBranch = true;
+        return new Response('', { status: 404 });
+      }
+      return new Response(JSON.stringify({ object: { sha: 'run-sha-1111111111111111111111111111111111' } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('', { status: 200 });
+  };
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'oga-empty-body-'));
+  const log = new SessionLog();
+  await log.open(path.join(dir, 'session.log'), '# run\n');
+  const published = await publishArtifacts({
+    spec: validLaunchRequest({ runId: 'run_1', repository: { fullName: 'owner/name', branch: 'agent-run/run_1' } }) as unknown as LaunchRequest,
+    runId: 'run_1',
+    workspace: dir,
+    token: 'ghp_test_token_value',
+    collected: { artifacts: [], missing: [], undeclared: [] },
+    outcome: { exitCode: 0, exitSignal: null, exitReason: 'completed', stdout: '', stderr: '', durationMs: 1, timedOut: false, outputTruncated: false },
+    startedAt: new Date(),
+    sessionLog: log,
+    fetchImpl: emptyBody404 as unknown as typeof fetch,
+  });
+
+  assert.equal(published.note, null, 'пустое тело на 404 не должно ронять публикацию');
+  assert.equal(published.repo.baseRef, 'main');
+  await rm(dir, { recursive: true, force: true });
 });

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "runId": "run_6995decf-a6cc-4274-b515-e90d86fbf09f",
+  "jobId": "job_c67df099-5240-4a83-920f-fa0b8134e1e3",
+  "exitReason": "completed",
+  "exitCode": 0,
+  "durationMs": 64033,
+  "artifacts": [],
+  "missingOutputs": [
+    "outputs/category-results.csv"
+  ],
+  "startedAt": "2026-10-05T10:26:29.296Z",
+  "finishedAt": "2026-10-05T10:28:15.764Z"
+}

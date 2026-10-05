@@ -10,6 +10,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { LaunchResult } from '../src/contracts.js';
 import { installHostCancellation, singleReport } from '../src/runner/cancellation.js';
 import { runAgent } from '../src/runner/exec.js';
+import { buildLaunchResult } from '../src/runner/main.js';
 import { validLaunchRequest } from './contracts.test.js';
 
 const runId = 'run_0fdd061d-14c3-42ea-b182-9393ff3564fa';
@@ -170,4 +171,50 @@ test('cancellation before spawn never fabricates cancelled or observed exit', as
   assert.equal(outcome.exitCode, null);
   assert.equal(outcome.exitSignal, null);
   assert.equal(outcome.timedOut, false);
+});
+
+test('private stdin cancellation preserves injected env, empty engine stdin and actual close without credential argv', { timeout: 10000 }, async () => {
+  const controller = new AbortController();
+  const credential = 'synthetic-private-cancellation-credential';
+  let closeObserved = false;
+  let reports = 0;
+  const outcome = await runAgent({
+    identity: { name: 'offline-fixture', uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0,
+      home: tmpdir(), workspace: process.cwd(), enforced: false },
+    binary: process.execPath,
+    argv: ['-e', `
+      const fs = require('node:fs');
+      if (!process.env.FIXTURE_PRIVATE_CREDENTIAL || fs.readFileSync(0).length !== 0 || process.env.CLAIM_TOKEN) process.exit(99);
+      process.on('SIGTERM', () => setTimeout(() => process.exit(24), 30));
+      process.stdout.write('ready');
+      setInterval(() => {}, 100);
+    `],
+    env: { FIXTURE_PRIVATE_CREDENTIAL: credential }, secrets: [credential],
+    timeoutMs: 5000, maxOutputBytes: 4096, signal: controller.signal,
+    onSpawn: child => {
+      assert.ok(!child.spawnargs.join(' ').includes(credential));
+      assert.ok(!child.spawnargs.join(' ').includes('FIXTURE_PRIVATE_CREDENTIAL'));
+      assert.equal(child.stdin?.writableEnded, true);
+      child.once('close', () => { closeObserved = true; });
+    },
+    onChunk: (stream, text) => {
+      if (stream === 'stdout' && text.includes('ready')) controller.abort('SIGINT');
+    },
+  });
+  assert.equal(closeObserved, true);
+  assert.equal(outcome.exitReason, 'cancelled');
+  assert.equal(outcome.exitCode, 24);
+  assert.equal(outcome.exitSignal, null);
+  assert.ok(!JSON.stringify(outcome).includes(credential));
+  const send = singleReport(async result => {
+    assert.equal(closeObserved, true);
+    assert.equal(result.exitCode, 24);
+    assert.equal(result.answer, '');
+    reports++;
+  });
+  const result = buildLaunchResult({ runId, outcome, answer: { source: null }, artifacts: [],
+    repo: { fullName: 'offline/repo', branch: 'offline', commit: '0'.repeat(40) },
+    logUrl: '', outputTruncated: false });
+  await Promise.all([send(result), send(result)]);
+  assert.equal(reports, 1);
 });

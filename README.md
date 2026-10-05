@@ -98,6 +98,14 @@ TERM, завершение descendants, repeated signals, single report посл
 отсутствие host credentials в agent env. Это не live GHA STOP acceptance и не
 основание включать CP stop gate без отдельного согласованного доказательства.
 
+Cancellation/private-stdin composition основана на `c8d7f9a`: включает private config
+spool/fail-closed answer changes `cc85c3b` и эквивалентные изменения Bohr
+`04bb28a`/`9164efe`. `identity.ts`, `private-launch.ts`, config installer и их tests
+сохранены без изменений. Merge в `exec.ts` сохраняет `stdin` payload, piped fd0 и
+его закрытие; cancellation listeners остаются привязаны к actual child close.
+Полная offline suite: 270 PASS, включая передачу private credential без argv,
+пустой stdin агента и single report после реального cancellation close.
+
 ## Что проверено на настоящем прогоне
 
 Прогон `37214618976`, 04.10.2026 — полный цикл от `POST /v1/launch` до `LaunchResult`:

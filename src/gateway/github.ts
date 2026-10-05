@@ -17,8 +17,22 @@ export interface DispatchResult {
 }
 
 export interface CancelResult {
-  cancelled: boolean;
-  reason: 'cancelled' | 'already_finished' | 'not_found' | 'not_dispatchable';
+  acknowledged: boolean;
+  reason: 'cancel_requested' | 'already_finished' | 'not_found' | 'not_dispatchable';
+}
+
+export interface WorkflowCompletion {
+  repo: string;
+  workflow: string;
+  githubRunId: number;
+  runAttempt: number;
+  jobId: number;
+  jobName: string;
+  conclusion: string;
+  jobConclusion: string;
+  completedAt: string;
+  observedAt: string;
+  agentStepStarted: boolean;
 }
 
 export interface GitHubClientOptions {
@@ -235,17 +249,48 @@ export class GitHubClient {
       'GET',
       `/repos/${this.repo}/actions/runs/${runId}`,
     );
-    if (detail.status === 404) return { cancelled: false, reason: 'not_found' };
-    if (detail.status !== 200) return { cancelled: false, reason: 'not_dispatchable' };
-    if (detail.data.status === 'completed') return { cancelled: false, reason: 'already_finished' };
+    if (detail.status === 404) return { acknowledged: false, reason: 'not_found' };
+    if (detail.status !== 200 || !detail.data) return { acknowledged: false, reason: 'not_dispatchable' };
+    if (detail.data.status === 'completed') return { acknowledged: false, reason: 'already_finished' };
 
     const cancel = await this.request<{ message?: string }>(
       'POST',
       `/repos/${this.repo}/actions/runs/${runId}/cancel`,
     );
-    if (cancel.status === 202 || cancel.status === 200) return { cancelled: true, reason: 'cancelled' };
-    if (cancel.status === 409) return { cancelled: false, reason: 'already_finished' };
-    if (cancel.status === 404) return { cancelled: false, reason: 'not_found' };
-    return { cancelled: false, reason: 'not_dispatchable' };
+    if (cancel.status === 202 || cancel.status === 200) return { acknowledged: true, reason: 'cancel_requested' };
+    if (cancel.status === 409) return { acknowledged: false, reason: 'already_finished' };
+    if (cancel.status === 404) return { acknowledged: false, reason: 'not_found' };
+    return { acknowledged: false, reason: 'not_dispatchable' };
+  }
+
+  async observeWorkflowCompletion(runId: number): Promise<WorkflowCompletion | null> {
+    if (!Number.isSafeInteger(runId) || runId <= 0) return null;
+    const detail = await this.request<{
+      id?: number; status?: string; conclusion?: string; run_attempt?: number;
+      event?: string; path?: string; head_branch?: string; repository?: { full_name?: string };
+    }>('GET', `/repos/${this.repo}/actions/runs/${runId}`);
+    const run = detail.data;
+    const conclusions = ['success', 'failure', 'cancelled', 'timed_out', 'action_required', 'neutral', 'skipped', 'stale'];
+    if (detail.status !== 200 || !run || run.id !== runId || run.status !== 'completed' ||
+        !conclusions.includes(run.conclusion ?? '') || run.run_attempt !== 1 || run.event !== 'workflow_dispatch' ||
+        run.repository?.full_name !== this.repo ||
+        run.path?.split('@')[0] !== `.github/workflows/${this.workflow}` ||
+        (this.ref !== undefined && run.head_branch !== this.ref)) return null;
+    const jobs = await this.request<{ total_count?: number; jobs?: Array<{
+      id?: number; run_id?: number; run_attempt?: number; name?: string; status?: string;
+      conclusion?: string; completed_at?: string;
+      steps?: Array<{ name?: string; started_at?: string; status?: string }>;
+    }> }>('GET', `/repos/${this.repo}/actions/runs/${runId}/attempts/1/jobs?per_page=100`);
+    const job = jobs.data?.jobs?.[0];
+    if (jobs.status !== 200 || jobs.data?.total_count !== 1 || jobs.data.jobs?.length !== 1 ||
+        !job || !Number.isSafeInteger(job.id) || job.id! <= 0 || job.run_id !== runId ||
+        (job.run_attempt !== undefined && job.run_attempt !== 1) || job.name !== 'run' || job.status !== 'completed' ||
+        !conclusions.includes(job.conclusion ?? '') || typeof job.completed_at !== 'string' ||
+        !Number.isFinite(Date.parse(job.completed_at))) return null;
+    return { repo: this.repo, workflow: this.workflow, githubRunId: runId, runAttempt: 1,
+      jobId: job.id!, jobName: job.name, conclusion: run.conclusion!, jobConclusion: job.conclusion!,
+      completedAt: job.completed_at, observedAt: new Date().toISOString(),
+      agentStepStarted: Array.isArray(job.steps) && job.steps.some(step => step.name === 'Run agent' &&
+        step.status === 'completed' && typeof step.started_at === 'string' && Number.isFinite(Date.parse(step.started_at))) };
   }
 }

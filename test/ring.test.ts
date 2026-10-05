@@ -155,8 +155,9 @@ function ringGateway(ring: RingTarget[], kv = memoryKv()) {
       findRunSince: async () => null,
       cancelWorkflowRun: async (runId: number) => {
         cancelled.push({ target: target.repo, runId });
-        return { cancelled: true, reason: 'cancelled' as const };
+        return { acknowledged: true, reason: 'cancel_requested' as const };
       },
+      observeWorkflowCompletion: async () => null,
     }) as unknown as GitHubClient;
 
   const app = createGateway({

@@ -10,7 +10,7 @@ id = "1dba9f69de58422d8b002e2e837a7384"
 [vars]
 GITHUB_REPO = "vovalikessmoothy-png/opencode-gha-runner"
 GITHUB_WORKFLOW = "run-agent.yml"
-GITHUB_REF = "integration/final-answer-v1-20261005"
+GITHUB_REF = "integration/native-cli-composed-v1-20261005"
 PUBLIC_BASE_URL = "https://trained-assist-native-worker-v1-sandbox.skillset-apply.workers.dev"
 AGENT_BINARY = "opencode"
 REQUIRE_CLAIM_AUTH = "true"

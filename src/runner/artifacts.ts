@@ -206,16 +206,19 @@ export class GitHubRepoApi {
 
   private async defaultBranchSha(): Promise<{ branch: string; sha: string } | null> {
     const repo = await this.request<{ default_branch?: string }>('GET', `/repos/${this.repo}`);
-    const branch = repo.data.default_branch;
+    const branch = repo.data?.default_branch;
     if (!branch) return null;
     const ref = await this.request<{ object?: { sha?: string } }>('GET', `/repos/${this.repo}/git/ref/heads/${branch}`);
-    const sha = ref.data.object?.sha;
+    const sha = ref.data?.object?.sha;
     return sha ? { branch, sha } : null;
   }
 
   private async branchSha(branch: string): Promise<string | null> {
     const ref = await this.request<{ object?: { sha?: string } }>('GET', `/repos/${this.repo}/git/ref/heads/${branch}`);
-    return ref.data.object?.sha ?? null;
+    // `data` может оказаться undefined: пустое тело на 404 или на ответ посередине сети.
+    // Раньше это давало TypeError вместо «ветки нет», и публикация падала как
+    // «could not create branch» вместо «ветки нет, создадим».
+    return ref.data?.object?.sha ?? null;
   }
 
   private async createBranch(branch: string, sha: string): Promise<boolean> {

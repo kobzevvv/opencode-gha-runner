@@ -79,7 +79,7 @@ function logLine(line: string): void {
   process.stdout.write(`[gha-runner] ${line}\n`);
 }
 
-class SessionLog {
+export class SessionLog {
   private ready = false;
 
   async open(filePath: string, header: string): Promise<void> {
@@ -283,6 +283,12 @@ interface RepoRef {
   fullName: string;
   branch: string;
   commit: string;
+  /**
+   * Ветка, от которой заведён ран (`main` у репозитория). Наше API строит по нему адрес
+   * мержа: `/compare/<baseRef>...<branch>`. Без него клиент получает адрес ветки вместо
+   * адреса мержа, и «куда мержить» превращается в ручной поиск.
+   */
+  baseRef?: string;
 }
 
 /**
@@ -294,7 +300,7 @@ interface RepoRef {
  * Неудача пуша не фатальна: она уходит в `stderr` ответа, потому что ран-то отработал,
  * и наш API должен увидеть его итог, а не потерять из-за проблемы с git.
  */
-async function publishArtifacts(options: {
+export async function publishArtifacts(options: {
   spec: LaunchRequest;
   runId: string;
   workspace: string;
@@ -303,6 +309,8 @@ async function publishArtifacts(options: {
   outcome: ExecOutcome;
   startedAt: Date;
   sessionLog: SessionLog;
+  /** Подмена GitHub API — только для тестов; боевой путь ходит в api.github.com. */
+  fetchImpl?: typeof fetch;
 }): Promise<{ artifactRefs: ArtifactRef[]; repo: RepoRef; note: string | null }> {
   const { spec, runId, workspace, token, collected, outcome, startedAt, sessionLog } = options;
   const fallback: RepoRef = { fullName: spec.repository.fullName, branch: spec.repository.branch, commit: NULL_SHA };
@@ -333,7 +341,11 @@ async function publishArtifacts(options: {
   });
 
   try {
-    const pushed = await new GitHubRepoApi({ token, repo: spec.repository.fullName }).pushFiles({
+    const pushed = await new GitHubRepoApi({
+      token,
+      repo: spec.repository.fullName,
+      ...(options.fetchImpl !== undefined ? { fetchImpl: options.fetchImpl } : {}),
+    }).pushFiles({
       branch: spec.repository.branch,
       commitMessage: `opencode-gha-runner: ${runId} (${outcome.exitReason})`,
       files,
@@ -344,7 +356,12 @@ async function publishArtifacts(options: {
     );
     return {
       artifactRefs: collected.artifacts,
-      repo: { fullName: pushed.fullName, branch: pushed.branch, commit: pushed.commit },
+      repo: {
+        fullName: pushed.fullName,
+        branch: pushed.branch,
+        commit: pushed.commit,
+        ...(pushed.baseRef !== undefined ? { baseRef: pushed.baseRef } : {}),
+      },
       note: null,
     };
   } catch (cause) {

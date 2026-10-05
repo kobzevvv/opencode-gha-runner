@@ -19,6 +19,7 @@ import { isSafeRelativePath } from '../contracts.js';
 
 export interface CollectResult {
   artifacts: ArtifactRef[];
+  files: Array<{ path: string; content: Buffer }>;
   /** Объявленные, но отсутствующие на диске — их absence не должна быть тихой. */
   missing: string[];
   /** Найденные, но не объявленные: попадают в манифест, но не считаются результатом. */
@@ -58,6 +59,7 @@ export async function collectArtifacts(
   readOnlyDirs: string[] = [],
 ): Promise<CollectResult> {
   const artifacts: ArtifactRef[] = [];
+  const files: CollectResult['files'] = [];
   const missing: string[] = [];
   const undeclared: string[] = [];
   const declared = outputs ?? [];
@@ -97,7 +99,16 @@ export async function collectArtifacts(
     // а MIME — по расширению. Так артефакт всегда описывается полностью, даже если
     // наш API прислал только `path`.
     const name = output.name ?? path.posix.basename(output.path);
-    const { sha256, size } = await sha256File(absolute);
+    let content: Buffer;
+    try {
+      content = await readFile(real);
+    } catch {
+      missing.push(output.path);
+      continue;
+    }
+    const sha256 = createHash('sha256').update(content).digest('hex');
+    const size = content.length;
+    files.push({ path: `artifacts/${output.path}`, content });
     artifacts.push({
       path: `artifacts/${output.path}`,
       name,
@@ -123,7 +134,7 @@ export async function collectArtifacts(
     }
   }
 
-  return { artifacts, missing, undeclared };
+  return { artifacts, files, missing, undeclared };
 }
 
 async function realpathOrSelf(target: string): Promise<string> {

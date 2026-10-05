@@ -20,7 +20,6 @@
  */
 
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
 import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -282,7 +281,7 @@ interface RepoRef {
  * Неудача пуша не фатальна: она уходит в `stderr` ответа, потому что ран-то отработал,
  * и наш API должен увидеть его итог, а не потерять из-за проблемы с git.
  */
-async function publishArtifacts(options: {
+export async function publishArtifacts(options: {
   spec: LaunchRequest;
   runId: string;
   workspace: string;
@@ -290,21 +289,13 @@ async function publishArtifacts(options: {
   collected: CollectResult;
   outcome: ExecOutcome;
   startedAt: Date;
-  sessionLog: SessionLog;
+  sessionLog: Pick<SessionLog, 'append'>;
 }): Promise<{ artifactRefs: ArtifactRef[]; repo: RepoRef; note: string | null }> {
-  const { spec, runId, workspace, token, collected, outcome, startedAt, sessionLog } = options;
+  const { spec, runId, token, collected, outcome, startedAt, sessionLog } = options;
   const fallback: RepoRef = { fullName: spec.repository.fullName, branch: spec.repository.branch, commit: NULL_SHA };
 
-  const files: Array<{ path: string; content: Buffer }> = [];
-  for (const artifact of collected.artifacts) {
-    const source = path.resolve(workspace, artifact.path.replace(/^artifacts\//, ''));
-    try {
-      files.push({ path: artifact.path, content: readFileSync(source) });
-    } catch {
-      logLine(`declared output vanished before push: ${artifact.path}`);
-    }
-  }
-  const availableArtifacts = collected.artifacts.filter((artifact) => files.some((file) => file.path === artifact.path));
+  const files = [...collected.files];
+  const availableArtifacts = collected.artifacts;
   // Манифест кладём всегда: результат должен читаться из ветки, даже если выходов нет.
   files.push({
     path: 'artifacts/run-manifest.json',
@@ -315,7 +306,7 @@ async function publishArtifacts(options: {
       exitCode: outcome.exitCode,
       durationMs: outcome.durationMs,
       artifacts: availableArtifacts,
-      missingOutputs: [...collected.missing, ...collected.artifacts.filter((artifact) => !availableArtifacts.includes(artifact)).map((artifact) => artifact.path.replace(/^artifacts\//, ''))],
+      missingOutputs: collected.missing,
       startedAt: startedAt.toISOString(),
       finishedAt: new Date().toISOString(),
     }),

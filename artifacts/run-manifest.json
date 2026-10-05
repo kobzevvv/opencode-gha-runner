@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "runId": "run_ring1791165394",
+  "jobId": "job-e2e-1",
+  "exitReason": "completed",
+  "exitCode": 0,
+  "durationMs": 8339,
+  "artifacts": [
+    {
+      "path": "artifacts/report.md",
+      "name": "report.md",
+      "mime": "text/markdown",
+      "sha256": "2456ecf7e1b7fae41651b9baec5b5e9efad0e89c572adc56bad2c4100ba70fc7",
+      "size": 14
+    }
+  ],
+  "missingOutputs": [],
+  "startedAt": "2026-10-05T01:57:07.882Z",
+  "finishedAt": "2026-10-05T01:58:11.360Z"
+}

@@ -8,21 +8,19 @@
 # Имя workflow и job подставляется из имени репозитория, чтобы в списке Actions не
 # светилось имя нашего раннера: кольцо выглядит как обычные репозитории компании.
 #
-# Запуск — токеном, у которого есть `repo` и `workflow` на целевые репозитории:
+# Запуск (токен с правом `workflow` на целевые репозитории):
 #
-#   RING_TOKEN=ghp_… ./ring/provision.sh \
+#   ./ring/provision.sh \
+#     --token ghp_… \
 #     --gateway https://opencode-gha-runner-gateway.skillset-apply.workers.dev \
-#     my-first-org-here/opensource recruiting-me/runs
-#
-# Токен берётся из окружения, а не из argv: argv виден в `ps` любому пользователю на
-# машине. `--token` тоже принимается, но это способ для CI, где окружение не подходит.
+#     llm-tests/agent-run personalexperiments/agent-run
 #
 # Идемпотентен: повторный запуск перезапишет workflow и переменные.
 set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="$HERE/run-agent.yml"
-GATEWAY=""; TOKEN="${RING_TOKEN:-}"; LOG_UPLOAD="local"; GCS_BUCKET=""; AGENT_ARGS="--pure -m ladder/free"
+GATEWAY=""; TOKEN=""; LOG_UPLOAD="local"; GCS_BUCKET=""; AGENT_ARGS="--pure -m ladder/free"
 REPOS=()
 
 while [ $# -gt 0 ]; do
@@ -37,27 +35,25 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$TOKEN" ] || { echo "нужен токен: RING_TOKEN в окружении или --token" >&2; exit 2; }
+[ -n "$TOKEN" ] || { echo "--token is required" >&2; exit 2; }
 [ -n "$GATEWAY" ] || { echo "--gateway is required (публичный адрес шлюза)" >&2; exit 2; }
 [ -f "$TEMPLATE" ] || { echo "нет $TEMPLATE" >&2; exit 2; }
 [ "${#REPOS[@]}" -gt 0 ] || { echo "нужен хотя бы один репозиторий owner/name" >&2; exit 2; }
 
-# Все вызовы `gh` идут этим токеном: он и кладёт workflow в репозиторий кольца, и
-# становится `ARTIFACTS_TOKEN` в нём же — джобе нужен и `workflow` (вебхук), и
-# `contents: write` (клон репозитория пользователя и пуш артефактов).
-export GH_TOKEN="$TOKEN"
-
 # Кладёт файл в репозиторий. В пустом репозитории Contents API не создаёт промежуточные
 # каталоги (404), поэтому сначала заводим ветку файлом в корне.
+#
+# `sha` обязателен при обновлении существующего файла, и его нельзя брать «как есть»:
+# при 404 `gh api` печатает тело ошибки в stdout, и без проверки формы оно попадало
+# в поле `sha` — GitHub отвечал 404 на сам запрос.
 put_file() {
   local repo="$1" api_path="$2" content="$3" message="$4"
   local encoded sha body
   encoded="$(printf '%s' "$content" | base64 | tr -d '\n')"
-  # При 404 (пустой репозиторий, нет файла) `gh api` печатает тело ошибки в stdout и
-  # выходит с кодом 1. Без проверки формы это тело уезжает в `sha` поля PUT, и GitHub
-  # отвечает 422. Настоящий sha — ровно 40 hex-символов; всё остальное считаем «нет».
   sha="$(gh api "repos/$repo/contents/$api_path" --jq '.sha' 2>/dev/null || true)"
-  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || sha=""
+  if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+    sha=""
+  fi
   body="$(CONTENT="$encoded" SHA="$sha" MSG="$message" python3 -c '
 import json, os
 b = {"message": os.environ["MSG"], "content": os.environ["CONTENT"]}
@@ -71,13 +67,6 @@ fail=0
 for repo in "${REPOS[@]}"; do
   echo "$repo"
   name="${repo##*/}"
-  # Имя job в YAML — идентификатор, точка в нём недопустима. Репозиторий с точкой в имени
-  # дал бы workflow, который не распарсится, и dispatch отвечал бы 422 уже на бою. Поэтому
-  # проверяем здесь, а не в проде.
-  if ! [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]]; then
-    echo "  имя '$name' не годится как имя job (нужен [A-Za-z_][A-Za-z0-9_-]*)" >&2
-    fail=1; continue
-  fi
   # Имя workflow и job — из имени репозитория, чтобы наше имя не светилось в Actions.
   content="$(sed "s/{{REPO_NAME}}/$name/g" "$TEMPLATE")"
 

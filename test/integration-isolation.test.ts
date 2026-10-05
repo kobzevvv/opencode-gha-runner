@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
-test('integration deployment declares its own Worker and unprovisioned KV, never the shared namespace', () => {
+test('integration deployment declares its own Worker and isolated KV, never the shared namespace', () => {
   const sandbox = readFileSync('wrangler.integration-v1.toml', 'utf8');
   const shared = readFileSync('wrangler.toml', 'utf8');
   assert.ok(sandbox.includes('name = "trained-assist-native-worker-v1-sandbox"'));
-  assert.ok(sandbox.includes('id = "REPLACE_WITH_OWN_KV_NAMESPACE_ID"'));
+  const sandboxKv = sandbox.match(/^id = "([^"]+)"/m)?.[1];
+  assert.ok(sandboxKv && (sandboxKv === 'REPLACE_WITH_OWN_KV_NAMESPACE_ID' || /^[a-f0-9]{32}$/.test(sandboxKv)));
   const sharedKv = shared.match(/^id = "([^"]+)"/m)?.[1];
   assert.ok(sharedKv);
   assert.ok(!sandbox.includes(sharedKv));

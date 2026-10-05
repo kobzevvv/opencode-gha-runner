@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { claimRequestHeaders, type ClaimPayload } from '../src/claim.js';
+import { claimRequestHeaders, isSecureClaimUrl, type ClaimPayload } from '../src/claim.js';
 import type { LaunchRequest } from '../src/contracts.js';
 import { createGateway } from '../src/gateway/app.js';
 import { MemoryRunStore } from '../src/gateway/store.js';
@@ -87,6 +87,7 @@ test('claim client adds only a host header and redacts reflected auth in failure
   context.mock.method(globalThis, 'fetch', async (_url: unknown, init?: RequestInit) => {
     calls += 1;
     assert.deepEqual(init?.headers, claimRequestHeaders(publicToken, hostSecret));
+    assert.equal(init?.redirect, 'error');
     assert.deepEqual(JSON.parse(String(init?.body)), { runId });
     return new Response(`${hostSecret} ${publicToken}`, { status: 401 });
   });
@@ -101,6 +102,41 @@ test('required claim client without host secret refuses before any network call'
   context.mock.method(globalThis, 'fetch', async () => { calls += 1; throw new Error('No network allowed'); });
   assert.equal(await main({ GATEWAY_URL: 'https://example.test', RUN_ID: runId, CLAIM_TOKEN: publicToken, REQUIRE_CLAIM_AUTH: 'true' }), RUNNER_EXIT.badEnv);
   assert.equal(calls, 0);
+});
+
+test('secure claim URL validation rejects HTTP, malformed URLs and URL credentials', () => {
+  for (const url of ['http://example.test', 'http://localhost:8787', 'not-a-url', 'https://', 'ftp://example.test', 'https://user@example.test', 'https://user:password@example.test', 'https://:password@example.test']) {
+    assert.equal(isSecureClaimUrl(url), false);
+  }
+  for (const url of ['https://example.test', 'https://example.test:8443/gateway', 'https://[::1]:8443']) assert.equal(isSecureClaimUrl(url), true);
+});
+
+test('client refuses unsafe URLs before network whenever it would send host auth, regardless of requirement toggle', async (context) => {
+  let calls = 0;
+  let output = '';
+  context.mock.method(process.stdout, 'write', (chunk: unknown) => { output += String(chunk); return true; });
+  context.mock.method(globalThis, 'fetch', async () => { calls += 1; throw new Error('No network allowed'); });
+  for (const required of ['true', 'false']) {
+    for (const url of ['http://localhost:8787', 'not-a-url', 'https://user:private-password@example.test']) {
+      assert.equal(await main({ GATEWAY_URL: url, RUN_ID: runId, CLAIM_TOKEN: publicToken, REQUIRE_CLAIM_AUTH: required, CLAIM_AUTH_TOKEN: hostSecret }), RUNNER_EXIT.badEnv);
+    }
+  }
+  assert.equal(calls, 0);
+  assert.ok(!output.includes('private-password'));
+  assert.ok(!output.includes(hostSecret));
+});
+
+test('legacy localhost claim works without host credential and rejects redirects', async (context) => {
+  let calls = 0;
+  context.mock.method(globalThis, 'fetch', async (url: unknown, init?: RequestInit) => {
+    calls += 1;
+    assert.equal(url, 'http://localhost:8787/v1/claim');
+    assert.deepEqual(init?.headers, claimRequestHeaders(publicToken));
+    assert.equal(new Request(String(url), init).redirect, 'error');
+    return new Response('unauthorized', { status: 401 });
+  });
+  assert.equal(await main({ GATEWAY_URL: 'http://localhost:8787', RUN_ID: runId, CLAIM_TOKEN: publicToken }), RUNNER_EXIT.claimFailed);
+  assert.equal(calls, 1);
 });
 
 test('host environment credential is never inherited into model env, even if its name is allowlisted without an explicit spec value', () => {

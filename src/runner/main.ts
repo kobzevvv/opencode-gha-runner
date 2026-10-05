@@ -24,7 +24,7 @@ import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { claimRequestHeaders, REPORT_PATH, type ClaimPayload } from '../claim.js';
+import { claimRequestHeaders, isSecureClaimUrl, REPORT_PATH, type ClaimPayload } from '../claim.js';
 import {
   clampTimeout,
   failure,
@@ -397,6 +397,10 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     logLine('required claim authentication is unconfigured');
     return RUNNER_EXIT.badEnv;
   }
+  if (claimAuthToken && !isSecureClaimUrl(gatewayUrl)) {
+    logLine('host-authenticated claim requires HTTPS without URL credentials');
+    return RUNNER_EXIT.badEnv;
+  }
 
   const sessionLog = new SessionLog();
   let claim: ClaimPayload | null = null;
@@ -406,6 +410,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     // ── 1. claim ──────────────────────────────────────────────────────────────
     const claimResponse = await fetch(`${gatewayUrl}/v1/claim`, {
       method: 'POST',
+      redirect: 'error',
       headers: claimRequestHeaders(claimToken, claimAuthToken),
       body: JSON.stringify({ runId }),
     });

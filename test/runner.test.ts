@@ -11,10 +11,10 @@ import { mkdtemp, mkdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { AGENT_CONFIG_TEMPLATE, installAgentConfig, renderAgentConfig } from '../src/runner/agent-config.js';
+import { AGENT_CONFIG_TEMPLATE, installAgentConfig, renderAgentConfig, withAgentConfigSpool } from '../src/runner/agent-config.js';
 import { failure } from '../src/contracts.js';
 import { collectArtifacts } from '../src/runner/artifacts.js';
-import { buildLaunchResult } from '../src/runner/main.js';
+import { buildLaunchResult, emptyResult } from '../src/runner/main.js';
 import { capOutput, resolveAgentEnv, runAgent } from '../src/runner/exec.js';
 import { buildChildPath, buildLaunchCommand, ensureTraversable, identityName, MINIMAL_PATH, parentDirs, type Identity } from '../src/runner/identity.js';
 
@@ -559,7 +559,40 @@ test('status — «движок запустился», а не «чем кон�
       outcome: { exitCode: exitReason === 'completed' ? 0 : 1, exitSignal: null, exitReason, stdout: '', stderr: '', durationMs: 1, timedOut: exitReason === 'timeout', outputTruncated: false },
     });
     assert.equal(result.status, 'started', exitReason);
+    assert.equal(JSON.parse(JSON.stringify(result)).answer, '', exitReason);
   }
+});
+
+test('startup failure includes an empty answer on the JSON wire', () => {
+  const result = emptyResult('run_1', { fullName: 'o/r', branch: 'b' });
+  assert.equal(JSON.parse(JSON.stringify(result)).answer, '');
+  assert.equal(result.status, 'failed');
+  assert.equal(JSON.parse(JSON.stringify(emptyResult('run_1', { fullName: 'o/r', branch: 'b' }, { answer: undefined }))).answer, '');
+});
+
+test('reference-only config spool stays traversable under umask 077 and is removed', async () => {
+  const previous = process.umask(0o077);
+  let staging = '';
+  try {
+    await withAgentConfigSpool('{"apiKey":"{env:MODEL_KEY}"}', async (target) => {
+      staging = target;
+      assert.equal((await stat(path.dirname(target))).mode & 0o777, 0o755);
+      assert.equal((await stat(target)).mode & 0o777, 0o644);
+      assert.equal(readFileSync(target, 'utf8'), '{"apiKey":"{env:MODEL_KEY}"}');
+    });
+    await assert.rejects(stat(staging), { code: 'ENOENT' });
+  } finally {
+    process.umask(previous);
+  }
+});
+
+test('config spool is removed when identity-side installation fails', async () => {
+  let staging = '';
+  await assert.rejects(withAgentConfigSpool('{}', async (target) => {
+    staging = target;
+    throw new Error('identity write refused');
+  }), /identity write refused/);
+  await assert.rejects(stat(staging), { code: 'ENOENT' });
 });
 
 test('failure появляется только когда он есть', () => {

@@ -116,7 +116,7 @@ async function report(url: string, reportToken: string, result: LaunchResult): P
   logLine(`result reported: exitReason=${result.exitReason} artifacts=${result.artifacts.length}`);
 }
 
-function emptyResult(
+export function emptyResult(
   runId: string,
   repo: { fullName: string; branch: string },
   partial: Partial<LaunchResult> = {},
@@ -137,6 +137,7 @@ function emptyResult(
     logUrl: '',
     repo: { fullName: repo.fullName, branch: repo.branch, commit: NULL_SHA },
     ...partial,
+    answer: partial.answer ?? '',
     // `pid` фиксирован: его не должен перебить ни один вызов.
     pid: null,
   };
@@ -372,7 +373,7 @@ export function buildLaunchResult(input: {
     exitReason: outcome.exitReason,
     stdout: outcome.stdout,
     stderr: outcome.stderr,
-    answer: input.answer.text,
+    answer: input.answer.text ?? '',
     answerSource: input.answer.source,
     durationMs: outcome.durationMs,
     timedOut: outcome.timedOut,
@@ -484,7 +485,6 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
           identity: identityOfRun,
           llmKeyEnvName: claim.llmKeyEnvName,
           mcpServers: spec.mcp?.servers,
-          stagingDir: path.dirname(logFile),
         });
         const mcpCount = Object.keys(spec.mcp?.servers ?? {}).length;
         logLine(`agent config installed: ${agentConfigPath}${mcpCount > 0 ? ` (mcp servers: ${mcpCount})` : ''}`);

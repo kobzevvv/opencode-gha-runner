@@ -21,7 +21,8 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -104,6 +105,19 @@ export async function installAgentConfig(options: {
 
 const exec = promisify(execFile);
 
+export async function withAgentConfigSpool<Result>(rendered: string, consume: (staging: string) => Promise<Result>): Promise<Result> {
+  const directory = await mkdtemp(path.join(tmpdir(), 'opencode-config-'));
+  try {
+    const staging = path.join(directory, 'opencode.json');
+    await writeFile(staging, rendered, { encoding: 'utf8', mode: 0o644 });
+    await chmod(staging, 0o644);
+    await chmod(directory, 0o755);
+    return await consume(staging);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 /**
  * Ставит конфиг агента под идентичностью рана.
  *
@@ -123,23 +137,18 @@ export async function installAgentConfigUnderIdentity(options: {
   identity: Identity;
   llmKeyEnvName: string;
   mcpServers?: Record<string, McpRemoteServerSpec>;
-  /** Каталог, доступный обоим UID — staging пишется туда. */
-  stagingDir: string;
 }): Promise<string> {
   const { identity } = options;
   const env = { PATH: MINIMAL_PATH, HOME: identity.home };
-  const staging = path.join(options.stagingDir, 'opencode.json');
-
-  await mkdir(options.stagingDir, { recursive: true });
   const rendered = renderAgentConfig(
     await readFile(AGENT_CONFIG_TEMPLATE, 'utf8'),
     { llmKeyEnvName: options.llmKeyEnvName, mcpServers: options.mcpServers },
   );
-  await writeFile(staging, rendered, { encoding: 'utf8', mode: 0o644 });
-
   const target = path.join(identity.home, '.config', 'opencode', 'opencode.json');
-  await exec('sudo', ['-u', identity.name, '--', 'mkdir', '-p', path.dirname(target)], { env });
-  await exec('sudo', ['-u', identity.name, '--', 'cp', staging, target], { env });
-  await exec('sudo', ['-u', identity.name, '--', 'chmod', '600', target], { env });
-  return target;
+  return withAgentConfigSpool(rendered, async (staging) => {
+    await exec('sudo', ['-u', identity.name, '--', 'mkdir', '-p', path.dirname(target)], { env });
+    await exec('sudo', ['-u', identity.name, '--', 'cp', staging, target], { env });
+    await exec('sudo', ['-u', identity.name, '--', 'chmod', '600', target], { env });
+    return target;
+  });
 }

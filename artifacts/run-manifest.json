@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "runId": "run_7f4ba917-9c81-49fe-89db-fda7e78eeddc",
+  "jobId": "job_6b32c5f4-df42-400b-aee1-aaafdd263b90",
+  "exitReason": "completed",
+  "exitCode": 0,
+  "durationMs": 13380,
+  "artifacts": [
+    {
+      "path": "artifacts/report.md",
+      "name": "report.md",
+      "mime": "text/markdown",
+      "sha256": "37bbb7a2fb64d821479f8ed3f5ac9cc491250883d88ca25b4486dfb8fcf609d0",
+      "size": 51
+    }
+  ],
+  "missingOutputs": [],
+  "startedAt": "2026-10-05T15:11:01.074Z",
+  "finishedAt": "2026-10-05T15:12:04.761Z"
+}

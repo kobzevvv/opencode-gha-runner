@@ -1,0 +1,9 @@
+# Worker integration requirements
+
+Source: architecture issue [#140](https://github.com/trained-assist/trained-agent-architecture/issues/140), worker issue [#1](https://github.com/vovalikessmoothy-png/opencode-gha-runner/issues/1), 2026-10-05.
+
+- Isolated source branch based on deployed `ed81ae7`; do not alter shared ring edits, gateway deployments, secrets or workflow variables.
+- Prefer a regular in-workspace answer file; JSON stdout must select only a completed final assistant text turn. Tool/reasoning frames are not answers. Plain CLI mode retains its legacy fallback.
+- Declared outputs must exist and have a confirmed publication commit. Publication refusal is not a missing-file failure and must not report final success.
+- Preserve the actual agent exit code and original engine failure. Use the existing LaunchResult `nonzero_exit` terminal vocabulary for worker finalization failures, with explicit non-retryable finalization failure metadata; do not add an unsupported Runner enum.
+- GitHub refusal diagnostics contain only operation and HTTP status, never response bodies or credential values.

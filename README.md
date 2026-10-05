@@ -119,6 +119,13 @@ GCP Secret Manager. В репозиторий он не попадает: шлю
 
 ## Локальный запуск и приёмка
 
+### Final answer и обязательные выходы
+
+Связанные баги: [worker #1](https://github.com/vovalikessmoothy-png/opencode-gha-runner/issues/1), [integrator #140](https://github.com/trained-assist/trained-agent-architecture/issues/140).
+В JSON-режиме ответ извлекается из завершённого финального text-turn (`step_finish.reason=stop`), а не из tool/reasoning frames или всего stdout. Формат frames соответствует [OpenCode CLI JSON emitter](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/cli/cmd/run.ts). Файл `.agent/answer.txt` или `answer.txt` внутри workspace имеет приоритет; plain CLI сохраняет legacy fallback.
+
+Хостовые `outputs` дописываются как требования к исходному prompt. Для объявленных выходов отсутствующий файл даёт `ARTIFACTS_MISSING`; отказ публикации или неподтверждённый commit — `ARTIFACT_PUBLICATION_FAILED`. Эти terminal finalization failures не разрешают автоматический повтор движка. Actual agent `exitCode` сохраняется, но итоговый `exitReason=nonzero_exit`: это поддерживаемый Runner контрактом неуспешный исход воркера, даже если сам агент завершился с кодом 0. Ответ агента сам по себе не доказывает сохранение файлов. GitHub diagnostics содержат только операцию и HTTP status, без response body или credentials.
+
 ```bash
 npm ci
 npm run verify     # typecheck + 147 тестов + сквозной прогон контракта по HTTP

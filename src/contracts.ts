@@ -215,6 +215,8 @@ export const FAILURE_CODES = [
   // быть кода `AGENT_STARTUP_FAILED` — это разные вещи, и наш API по retryable-флагу
   // принял бы решение «повторить» там, где повтор бессмыслен.
   'AGENT_NONZERO_EXIT',
+  'ARTIFACTS_MISSING',
+  'ARTIFACT_PUBLICATION_FAILED',
 ] as const;
 
 export type FailureCode = (typeof FAILURE_CODES)[number];

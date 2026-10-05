@@ -35,12 +35,15 @@ import {
   type Failure,
   type LaunchRequest,
   type LaunchResult,
+  type OutputSpec,
 } from '../contracts.js';
 import { GitHubRepoApi, NULL_SHA, buildManifest, collectArtifacts, type CollectResult } from './artifacts.js';
 import { resolveAgentEnv, runAgent, type ExecOutcome } from './exec.js';
 import { createRunIdentity, destroyRunIdentity, isBinaryAvailable, runUnderIdentity, type Identity } from './identity.js';
 import { installAgentConfigUnderIdentity } from './agent-config.js';
 import { uploadSessionLog, type LogUploadMode } from './logs.js';
+import { agentOutputFormat, extractAnswer } from './answer.js';
+import { buildAgentPrompt, declaredOutputFailure } from './finalization.js';
 
 const exec = promisify(execFile);
 
@@ -301,6 +304,7 @@ async function publishArtifacts(options: {
       logLine(`declared output vanished before push: ${artifact.path}`);
     }
   }
+  const availableArtifacts = collected.artifacts.filter((artifact) => files.some((file) => file.path === artifact.path));
   // Манифест кладём всегда: результат должен читаться из ветки, даже если выходов нет.
   files.push({
     path: 'artifacts/run-manifest.json',
@@ -310,8 +314,8 @@ async function publishArtifacts(options: {
       exitReason: outcome.exitReason,
       exitCode: outcome.exitCode,
       durationMs: outcome.durationMs,
-      artifacts: collected.artifacts,
-      missingOutputs: collected.missing,
+      artifacts: availableArtifacts,
+      missingOutputs: [...collected.missing, ...collected.artifacts.filter((artifact) => !availableArtifacts.includes(artifact)).map((artifact) => artifact.path.replace(/^artifacts\//, ''))],
       startedAt: startedAt.toISOString(),
       finishedAt: new Date().toISOString(),
     }),
@@ -328,7 +332,7 @@ async function publishArtifacts(options: {
       `\npushed ${pushed.pushed.length} file(s) to ${pushed.fullName}@${pushed.branch} @ ${pushed.commit}\n`,
     );
     return {
-      artifactRefs: collected.artifacts,
+      artifactRefs: availableArtifacts,
       repo: { fullName: pushed.fullName, branch: pushed.branch, commit: pushed.commit },
       note: null,
     };
@@ -352,8 +356,14 @@ export function buildLaunchResult(input: {
   logUrl: string;
   outputTruncated: boolean;
   failure?: Failure;
+  outputs?: OutputSpec[];
+  missingOutputs?: string[];
+  publicationFailed?: boolean;
 }): LaunchResult {
-  const { outcome } = input;
+  const outputFailure = input.outcome.exitReason === 'completed' ? declaredOutputFailure(input.outputs, {
+    missing: input.missingOutputs ?? [], artifacts: input.artifacts, commit: input.repo.commit, failed: input.publicationFailed ?? false,
+  }) : undefined;
+  const outcome = outputFailure ? { ...input.outcome, exitReason: 'nonzero_exit' as const } : input.outcome;
   return {
     runId: input.runId,
     // `started` — движок отработал (в том числе с ненулевым кодом или таймаутом).
@@ -376,7 +386,7 @@ export function buildLaunchResult(input: {
     artifacts: input.artifacts,
     logUrl: input.logUrl,
     repo: input.repo,
-    ...(input.failure ? { failure: input.failure } : {}),
+    ...(input.failure ?? outputFailure ? { failure: input.failure ?? outputFailure } : {}),
   };
 }
 
@@ -491,7 +501,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       injectedSecrets: mcpSecrets,
     });
     const extraArgs = (env.AGENT_ARGS ?? '').split(' ').filter(Boolean);
-    const agentArgs = [...extraArgs, 'run', spec.input.inlinePrompt];
+    const agentArgs = [...extraArgs, 'run', buildAgentPrompt(spec.input.inlinePrompt, spec.outputs)];
     // Промпт в лог не пишем: он может содержать секреты, а лог уезжает в GCS.
     sessionLog.append('stdout', `\n$ ${claim.agentBinary} ${extraArgs.join(' ')} run <prompt>\n`);
 
@@ -542,7 +552,8 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     }
 
     // ── 7. ответ нашему API ────────────────────────────────────────────────────
-    const answer = extractAnswer(workspace, outcome.stdout);
+    const answer = extractAnswer(workspace, outcome.stdout, agentOutputFormat(extraArgs));
+    const engineFailure = failureForOutcome(outcome.exitReason, collected.missing);
     const result = buildLaunchResult({
       runId,
       outcome,
@@ -551,10 +562,13 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       repo: published.repo,
       logUrl,
       outputTruncated: outcome.outputTruncated || logTruncated,
-      failure: failureForOutcome(outcome.exitReason, collected.missing),
+      failure: engineFailure,
+      outputs: spec.outputs,
+      missingOutputs: collected.missing,
+      publicationFailed: published.note !== null,
     });
     await report(reportUrl, claim.reportToken, result);
-    return outcome.exitReason === 'completed' ? RUNNER_EXIT.ok : RUNNER_EXIT.agentFailed;
+    return result.exitReason === 'completed' ? RUNNER_EXIT.ok : RUNNER_EXIT.agentFailed;
   } catch (cause) {
     const safeSummary = redact(cause instanceof Error ? cause.message : String(cause), claim?.llmKey);
     logLine(`runner crashed: ${safeSummary}`);
@@ -592,26 +606,6 @@ function failureForOutcome(
     );
   }
   return undefined;
-}
-
-/**
- * Ответ агента: сначала файл (`.agent/answer.txt` или `answer.txt`), иначе хвост stdout.
- * Файл приоритетнее — stdout может быть перемешан логами установки пакетов.
- */
-function extractAnswer(
-  workspace: string,
-  stdout: string,
-): { text?: string; source: 'engine_stdout' | 'agent_file' | null } {
-  for (const candidate of ['.agent/answer.txt', 'answer.txt']) {
-    try {
-      const buffer = readFileSync(path.resolve(workspace, candidate));
-      if (buffer.length > 0) return { text: buffer.toString('utf8').trim(), source: 'agent_file' };
-    } catch {
-      // Нет файла — пробуем следующий кандидата.
-    }
-  }
-  const trimmed = stdout.trim();
-  return trimmed.length > 0 ? { text: trimmed, source: 'engine_stdout' } : { source: null };
 }
 
 const invokedDirectly =

@@ -206,15 +206,18 @@ export class GitHubRepoApi {
 
   private async defaultBranchSha(): Promise<{ branch: string; sha: string } | null> {
     const repo = await this.request<{ default_branch?: string }>('GET', `/repos/${this.repo}`);
+    if (repo.status !== 200) throw new Error(`GitHub repository lookup HTTP ${repo.status}`);
     const branch = repo.data.default_branch;
     if (!branch) return null;
     const ref = await this.request<{ object?: { sha?: string } }>('GET', `/repos/${this.repo}/git/ref/heads/${branch}`);
+    if (ref.status !== 200 && ref.status !== 404) throw new Error(`GitHub base ref lookup HTTP ${ref.status}`);
     const sha = ref.data.object?.sha;
     return sha ? { branch, sha } : null;
   }
 
   private async branchSha(branch: string): Promise<string | null> {
     const ref = await this.request<{ object?: { sha?: string } }>('GET', `/repos/${this.repo}/git/ref/heads/${branch}`);
+    if (ref.status !== 200 && ref.status !== 404) throw new Error(`GitHub publication ref lookup HTTP ${ref.status}`);
     return ref.data.object?.sha ?? null;
   }
 
@@ -223,7 +226,8 @@ export class GitHubRepoApi {
       ref: `refs/heads/${branch}`,
       sha,
     });
-    return created.status === 201;
+    if (created.status !== 201) throw new Error(`GitHub branch creation HTTP ${created.status}`);
+    return true;
   }
 
   /** Публичная ссылка на файл в конкретной ветке. */
@@ -267,7 +271,7 @@ export class GitHubRepoApi {
         },
       );
       if (response.status !== 200 && response.status !== 201) {
-        throw new Error(`could not write ${file.path}: ${response.data.message ?? response.status}`);
+        throw new Error(`GitHub artifact write HTTP ${response.status}`);
       }
       pushed.push(file.path);
     }
@@ -281,9 +285,10 @@ export class GitHubRepoApi {
     }
 
     const head = await this.branchSha(options.branch);
+    if (!head) throw new Error('GitHub publication commit could not be verified');
     return {
       fullName: this.repo,
-      commit: head ?? NULL_SHA,
+      commit: head,
       branch: options.branch,
       ...(base ? { baseRef: base.branch } : {}),
       pushed,

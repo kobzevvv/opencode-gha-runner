@@ -10,6 +10,8 @@ import { KvRunStore, type KvLike } from './gateway/store.js';
 export interface Env {
   RUNS: KvLike;
   WORKER_TOKEN: string;
+  REQUIRE_CLAIM_AUTH?: string;
+  CLAIM_AUTH_TOKEN?: string;
   GITHUB_TOKEN: string;
   GITHUB_REPO: string;
   GITHUB_WORKFLOW?: string;
@@ -31,6 +33,8 @@ export default {
     const app = createGateway({
       config: {
         workerToken: env.WORKER_TOKEN,
+        requireClaimAuth: env.REQUIRE_CLAIM_AUTH === 'true',
+        claimAuthToken: env.CLAIM_AUTH_TOKEN,
         repo: env.GITHUB_REPO,
         workflow: env.GITHUB_WORKFLOW ?? 'run-agent.yml',
         ref: env.GITHUB_REF || undefined,

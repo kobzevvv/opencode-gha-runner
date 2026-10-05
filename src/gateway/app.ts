@@ -33,6 +33,8 @@ import { isTerminal, workerStatus, type KvLike, type RunStore, type StoredRun } 
 export interface GatewayConfig {
   /** Общий секрет между нашим API и воркером (`Authorization: Bearer`). */
   workerToken: string;
+  requireClaimAuth?: boolean;
+  claimAuthToken?: string;
   /** Репозиторий с workflow: `owner/name`. */
   repo: string;
   /** Файл workflow, например `run-agent.yml`. */
@@ -91,8 +93,8 @@ function noStore(extra: Record<string, string> = {}): Record<string, string> {
   return { 'cache-control': 'no-store', ...extra };
 }
 
-function bearer(request: Request): string | null {
-  const header = request.headers.get('authorization');
+function bearer(request: Request, name = 'authorization'): string | null {
+  const header = request.headers.get(name);
   if (!header) return null;
   const match = /^Bearer\s+(.+)$/i.exec(header.trim());
   return match?.[1]?.trim() ?? null;
@@ -283,6 +285,12 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
   }
 
   async function handleClaim(request: Request): Promise<Response> {
+    if (config.requireClaimAuth) {
+      const secret = config.claimAuthToken?.trim();
+      if (!secret) return json({ error: 'claim_auth_unconfigured' }, 503, noStore());
+      const authorization = bearer(request, 'x-claim-host-auth');
+      if (!authorization || !timingSafeEqual(authorization, secret)) return json({ error: 'unauthorized' }, 401, noStore());
+    }
     const token = bearer(request);
     if (!token) return json({ error: 'unauthorized' }, 401, noStore());
 

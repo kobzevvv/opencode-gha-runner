@@ -71,6 +71,8 @@ jobs:
           GATEWAY_URL: ${{ github.ref_name == 'integration/final-answer-v1-20261005' && 'https://trained-assist-native-worker-v1-sandbox.skillset-apply.workers.dev' || vars.GATEWAY_URL }}
           RUN_ID: ${{ inputs.run_id }}
           CLAIM_TOKEN: ${{ inputs.claim_token }}
+          REQUIRE_CLAIM_AUTH: ${{ github.ref_name == 'integration/final-answer-v1-20261005' && 'true' || '' }}
+          CLAIM_AUTH_TOKEN: ${{ github.ref_name == 'integration/final-answer-v1-20261005' && secrets.INTEGRATOR_V1_CLAIM_AUTH_TOKEN || '' }}
           ARTIFACTS_TOKEN: ${{ secrets.ARTIFACTS_TOKEN }}
           LOG_UPLOAD: ${{ vars.LOG_UPLOAD || 'gcs' }}
           GCS_LOG_BUCKET: ${{ vars.GCS_LOG_BUCKET }}

@@ -128,6 +128,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): GatewayConf
   const port = Number(env['PORT'] ?? '8787');
   return {
     workerToken: required('WORKER_TOKEN'),
+    requireClaimAuth: env['REQUIRE_CLAIM_AUTH'] === 'true',
+    claimAuthToken: env['CLAIM_AUTH_TOKEN'],
     repo: required('GITHUB_REPO'),
     workflow: env['GITHUB_WORKFLOW'] ?? 'run-agent.yml',
     ref: env['GITHUB_REF'] || undefined,

@@ -5,7 +5,7 @@ workers_dev = true
 
 [[kv_namespaces]]
 binding = "RUNS"
-id = "REPLACE_WITH_OWN_KV_NAMESPACE_ID"
+id = "1dba9f69de58422d8b002e2e837a7384"
 
 [vars]
 GITHUB_REPO = "vovalikessmoothy-png/opencode-gha-runner"

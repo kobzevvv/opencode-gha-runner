@@ -172,11 +172,12 @@ fi
 # Ключ LLM: берём с VM, где лежит реальный ключ кольца. В репозиторий он не попадает.
 LLM_KEY="${LLM_KEY:-}"
 if [ -z "$LLM_KEY" ]; then
-  # BatchMode — без него ssh может молча ждать подтверждения хоста или пароля sudo,
-  # и скрипт вместо отказа висит. Ключ вытаскивается awk по разделителю: вариант с sed
-  # и вложенными кавычками ломался на трёх уровнях экранирования.
+  # Два grep -oE и ни одной кавычки для awk: awk на VM получал `-F'\\"'` и отвечал
+  # «regexp escape sequence is not a known regexp operator», ключ приходил пустым.
+  # Экранирование в три слоя здесь и было источником проблемы, а не сама команда.
+  # BatchMode нужен, чтобы ssh не ждал молча подтверждения хоста или пароля sudo.
   LLM_KEY="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$LLM_KEY_HOST" \
-    "sudo grep -o 'LLM_LADDER_TOKEN\\\\\":\\\\\"[a-z0-9]*' /etc/agent-runner/integrator-v1-combined.env | head -1 | awk -F'\\\\\"' '{print \$NF}'" 2>/dev/null || true)"
+    "sudo grep -oE 'LLM_LADDER_TOKEN.{0,3}[a-f0-9]{64}' /etc/agent-runner/integrator-v1-combined.env | head -1 | grep -oE '[a-f0-9]{64}'" 2>/dev/null || true)"
 fi
 [ -n "$LLM_KEY" ] || die "не нашёл ключ LLM. Задай LLM_KEY=… вручную (нужен ключ кольца с доступом к ladder/free)"
 

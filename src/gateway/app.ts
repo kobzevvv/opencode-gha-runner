@@ -26,7 +26,7 @@ import {
   type LaunchRequest,
   type LaunchResult,
 } from '../contracts.js';
-import { DispatchError, GitHubClient, type GitHubClientOptions } from './github.js';
+import { DispatchError, GitHubClient, type GitHubClientOptions, type WorkflowCompletion } from './github.js';
 import { Ring, type RingTarget } from './ring.js';
 import { isTerminal, workerStatus, type KvLike, type RunStore, type StoredRun } from './store.js';
 
@@ -381,7 +381,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
 
   /** `GET /v1/runs/{runId}/status` — контрактный статус, без результата. */
   async function handleRunStatus(runId: string): Promise<Response> {
-    const run = await store.get(runId);
+    const run = await reconcileWorkflowCompletion(runId);
     // Неизвестный ран — это `unknown`, а не 404: исход установить нельзя, и наш API
     // должен пойти в reconcile, а не решить, что запуска не было.
     if (!run) {
@@ -396,7 +396,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
 
   /** `GET /v1/runs/{runId}/result` — `LaunchResult` или 409, пока ран не терминальный. */
   async function handleRunResult(runId: string): Promise<Response> {
-    const run = await store.get(runId);
+    const run = await reconcileWorkflowCompletion(runId);
     if (!run || !run.result || !isTerminal(workerStatus(run))) {
       return json({ runId, status: 'not_ready' }, 409, noStore());
     }
@@ -404,7 +404,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
   }
 
   // Авторизацию проверяет роутер: до обработчика доживает только валидный токен.
-async function handleCancel(runId: string): Promise<Response> {
+  async function handleCancel(runId: string): Promise<Response> {
     const run = await store.get(runId);
     if (!run) return json({ status: 'unknown_run' }, 200, noStore());
     if (run.phase === 'done') {
@@ -412,40 +412,61 @@ async function handleCancel(runId: string): Promise<Response> {
       return json({ status: workerStatus(run) === 'cancelled' ? 'cancelled' : 'rejected', reason: 'already_finished' }, 200, noStore());
     }
     if (run.githubRunId === null) {
-      // GitHub-прогон ещё не создан — отменять нечего, но рана больше не будет.
-      await store.complete(runId, run.reportToken, cancelledResult(run));
-      return json({ status: 'cancelled', reason: 'cancelled_before_dispatch' }, 200, noStore());
+      return json({ status: 'rejected', reason: 'dispatch_outcome_unknown' }, 200, noStore());
     }
 
     // Клиент — под цель рана, а не под текущую: round-robin к этому моменту мог
     // выбрать другой репозиторий, и отмена ушла бы не туда.
     const outcome = await clientFor(run.target).cancelWorkflowRun(run.githubRunId);
-    if (outcome.cancelled) {
-      await store.complete(runId, run.reportToken, cancelledResult(run));
-      return json({ status: 'cancelled' }, 200, noStore());
+    const observed = await reconcileWorkflowCompletion(runId);
+    if (observed?.phase === 'done') {
+      return json({ status: workerStatus(observed) === 'cancelled' ? 'cancelled' : 'rejected',
+        reason: 'already_finished' }, 200, noStore());
     }
     // «Не нашёл» и «уже завершился» — не отказ воркера: отменять действительно нечего.
-    return json({ status: 'rejected', reason: outcome.reason }, 200, noStore());
+    return json({ status: 'rejected', reason: outcome.acknowledged ? 'cancel_pending' : outcome.reason }, 200, noStore());
   }
 
-  /** Результат отменённого рана: наш API читает его из `/result`, а не из пустоты. */
-  function cancelledResult(run: StoredRun): LaunchResult {
+  async function reconcileWorkflowCompletion(runId: string): Promise<StoredRun | null> {
+    const run = await store.get(runId);
+    if (!run || run.phase === 'done' || run.githubRunId === null) return run;
+    try {
+      const observation = await clientFor(run.target).observeWorkflowCompletion(run.githubRunId);
+      if (!observation || observation.githubRunId !== run.githubRunId || observation.repo !== run.target.repo ||
+          observation.workflow !== config.workflow || observation.runAttempt !== 1) return run;
+      const current = await store.get(runId);
+      if (!current || current.phase === 'done') return current;
+      if (current.githubRunId !== run.githubRunId || current.target.repo !== run.target.repo) return current;
+      if ((current.phase === 'claimed' || current.phase === 'running') && !observation.agentStepStarted) return current;
+      await store.patch(runId, { completionObservation: observation });
+      await store.complete(runId, current.reportToken, workflowEndedResult(current, observation));
+      return await store.get(runId);
+    } catch {
+      return await store.get(runId);
+    }
+  }
+
+  function workflowEndedResult(run: StoredRun, observation: WorkflowCompletion): LaunchResult {
+    const claimed = run.phase === 'claimed' || run.phase === 'running';
+    const cancelled = claimed && observation.conclusion === 'cancelled' && observation.jobConclusion === 'cancelled';
     return {
       runId: run.runId,
       status: 'failed',
       pid: null,
       exitCode: null,
-      exitSignal: 'SIGTERM',
-      exitReason: 'cancelled',
+      exitSignal: null,
+      exitReason: cancelled ? 'cancelled' : 'startup_failure',
       stdout: '',
       stderr: '',
       answerSource: null,
-      durationMs: now() - run.createdAt,
+      durationMs: Math.max(0, Date.parse(observation.completedAt) - run.createdAt),
       timedOut: false,
       outputTruncated: false,
       artifacts: [],
       logUrl: '',
       repo: { fullName: run.request.repository.fullName, branch: run.request.repository.branch, commit: '0'.repeat(40) },
+      failure: failure('WORKFLOW_ENDED_WITHOUT_REPORT', 'runtime',
+        `GitHub workflow ${observation.githubRunId} attempt ${observation.runAttempt} job ${observation.jobId} completed ${observation.jobConclusion}; ${claimed ? 'claim recorded; process exit unobserved' : 'no claim recorded; process launch unobserved'}`),
     };
   }
 

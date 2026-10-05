@@ -50,6 +50,33 @@ GitHub Actions: .github/workflows/run-agent.yml
 `AGENT_TIMEOUT`, `AGENT_CRASH`, `AGENT_NONZERO_EXIT`, `WORKER_INTERNAL`,
 `ISOLATION_UNSUPPORTED`.
 
+### Отмена и workflow без отчёта
+
+GitHub [cancel workflow run](https://docs.github.com/en/rest/actions/workflow-runs#cancel-a-workflow-run)
+HTTP202 подтверждает запрос, не выход процесса. Пока завершение не наблюдалось,
+`/cancel` возвращает `rejected / cancel_pending`; статус остаётся nonterminal,
+`/result` — 409. Неизвестный исход dispatch также не считается отменой.
+
+`/status` и `/result` сверяют завершение закреплённого GitHub run и его единственного
+job `run` через [attempt jobs API](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt).
+Проверяются repo, workflow, ref при наличии, event, run ID и attempt 1; неизвестные,
+неполные, неоднозначные и in-progress ответы не завершают run. Completion metadata
+сохраняются в `completionObservation`, без токенов и без расширения wire-контракта.
+
+Завершённый workflow без claim/report, включая zero-step failure/cancelled,
+становится non-retryable `WORKFLOW_ENDED_WITHOUT_REPORT / startup_failure`.
+Claimed run может стать `cancelled` только после завершения job и наблюдения
+начавшегося шага `Run agent`. Это всё ещё не доказательство выхода процесса:
+`pid`, `exitCode`, `exitSignal` остаются null, поэтому Runner сохраняет
+`exitObserved:false`. CP stop нельзя считать подтверждённым по этой информации.
+Claimed run с zero-step GHA job остаётся nonterminal: claim может принадлежать
+альтернативному recovery host. Настоящий сохранённый report всегда имеет приоритет.
+
+Не активировать orphan reconciliation, пока оператор готовит sole-claim recovery
+уже принятого unclaimed run: новые status/result запросы могут завершить такой
+workflow как infra failure. Source-ветка не изменяет существующий deployment;
+необходим отдельный согласованный cutover после recovery.
+
 ## Что проверено на настоящем прогоне
 
 Прогон `37214618976`, 04.10.2026 — полный цикл от `POST /v1/launch` до `LaunchResult`:

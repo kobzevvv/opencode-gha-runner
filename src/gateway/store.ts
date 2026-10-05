@@ -14,6 +14,7 @@
 
 import type { LaunchRequest, LaunchResult, RunPhase, WorkerRunStatus } from '../contracts.js';
 import type { RingTarget } from './ring.js';
+import type { WorkflowCompletion } from './github.js';
 
 export interface StoredRun {
   runId: string;
@@ -48,6 +49,7 @@ export interface StoredRun {
   /** Одноразовый токен для `POST /v1/runs/{runId}/result`. */
   reportToken: string;
   result: LaunchResult | null;
+  completionObservation?: WorkflowCompletion;
 }
 
 export interface RunStore {
@@ -64,7 +66,7 @@ export interface RunStore {
   claim(runId: string, claimToken: string): Promise<StoredRun | null>;
   /** Кладёт финальный результат. Повторная отправка того же результата — no-op. */
   complete(runId: string, reportToken: string, result: LaunchResult): Promise<boolean>;
-  patch(runId: string, patch: Partial<Pick<StoredRun, 'phase' | 'githubRunId'>>): Promise<void>;
+  patch(runId: string, patch: Partial<Pick<StoredRun, 'phase' | 'githubRunId' | 'completionObservation'>>): Promise<void>;
   /** Все не завершённые раны — воркер держит их в памяти для отмены. */
   listActive(): Promise<StoredRun[]>;
 }
@@ -148,7 +150,7 @@ export class MemoryRunStore implements RunStore {
     return true;
   }
 
-  async patch(runId: string, patch: Partial<Pick<StoredRun, 'phase' | 'githubRunId'>>): Promise<void> {
+  async patch(runId: string, patch: Partial<Pick<StoredRun, 'phase' | 'githubRunId' | 'completionObservation'>>): Promise<void> {
     const run = this.runs.get(runId);
     if (run) Object.assign(run, patch, { updatedAt: Date.now() });
   }
@@ -228,7 +230,7 @@ export class KvRunStore implements RunStore {
     return true;
   }
 
-  async patch(runId: string, patch: Partial<Pick<StoredRun, 'phase' | 'githubRunId'>>): Promise<void> {
+  async patch(runId: string, patch: Partial<Pick<StoredRun, 'phase' | 'githubRunId' | 'completionObservation'>>): Promise<void> {
     const run = await this.get(runId);
     if (!run) return;
     Object.assign(run, patch, { updatedAt: Date.now() });

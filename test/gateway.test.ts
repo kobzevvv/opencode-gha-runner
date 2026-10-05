@@ -9,8 +9,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createGateway, type GatewayConfig } from '../src/gateway/app.js';
-import { DispatchError, GitHubClient, type DispatchResult } from '../src/gateway/github.js';
+import { DispatchError, GitHubClient, type DispatchResult, type WorkflowCompletion } from '../src/gateway/github.js';
 import { MemoryRunStore } from '../src/gateway/store.js';
+import type { LaunchResult } from '../src/contracts.js';
 import { validLaunchRequest } from './contracts.test.js';
 
 const WORKER_TOKEN = 'worker-token-for-tests';
@@ -39,6 +40,7 @@ function harness(options: {
   /** Что вернёт `findRunSince` при неоднозначном отказе. `null` — прогона не появилось. */
   runAppeared?: { id: number } | null;
   deliveryStatus?: number;
+  completion?: () => Promise<WorkflowCompletion | null>;
 } = {}): Harness {
   const store = new MemoryRunStore();
   const dispatched: Array<{ runId: string; claimToken: string }> = [];
@@ -64,8 +66,9 @@ function harness(options: {
     },
     cancelWorkflowRun: async (runId: number) => {
       cancelled.push(runId);
-      return { cancelled: true, reason: 'cancelled' as const };
+      return { acknowledged: true, reason: 'cancel_requested' as const };
     },
+    observeWorkflowCompletion: options.completion ?? (async () => null),
   } as unknown as GitHubClient;
 
   const app = createGateway({
@@ -341,19 +344,117 @@ test('после завершения в хранилище не остаётс�
 
 // ── cancel ─────────────────────────────────────────────────────────────────────
 
-test('cancel живого рана гасит GitHub-прогон и делает его терминальным', async () => {
+test('cancel HTTP202 acknowledges the request without inventing exit or terminal result', async () => {
   const h = harness();
   await h.fetch(launch(spec()));
   const response = await h.fetch(post(`/v1/runs/${RUN_ID}/cancel`, {}));
   assert.equal(response.status, 200);
-  assert.equal(((await response.json()) as { status: string }).status, 'cancelled');
+  assert.deepEqual(await response.json(), { status: 'rejected', reason: 'cancel_pending' });
   assert.deepEqual(h.cancelled, [4242]);
 
-  // Результат отмены читается из /result, а не из пустоты.
   const status = (await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as { status: string };
-  assert.equal(status.status, 'cancelled');
-  const result = (await (await h.fetch(get(`/v1/runs/${RUN_ID}/result`))).json()) as { exitReason: string };
+  assert.equal(status.status, 'accepted');
+  assert.equal((await h.fetch(get(`/v1/runs/${RUN_ID}/result`))).status, 409);
+  assert.equal((await h.store.get(RUN_ID))?.result, null);
+  assert.equal((await h.store.get(RUN_ID))?.target.token, 'github-token');
+});
+
+function completion(conclusion = 'cancelled'): WorkflowCompletion {
+  return { repo: config.repo, workflow: config.workflow, githubRunId: 4242, runAttempt: 1,
+    jobId: 111950479789, jobName: 'run', conclusion, jobConclusion: conclusion,
+    completedAt: new Date().toISOString(), observedAt: new Date().toISOString(), agentStepStarted: true };
+}
+
+test('a claimed run becomes cancelled only after canonical job completion is observed, never synthetic SIGTERM', async () => {
+  let observation: WorkflowCompletion | null = null;
+  const h = harness({ completion: async () => observation });
+  await h.fetch(launch(spec()));
+  const stored = await h.store.get(RUN_ID);
+  assert.ok(stored);
+  await h.store.claim(RUN_ID, stored.claimToken);
+  await h.fetch(post(`/v1/runs/${RUN_ID}/cancel`, {}));
+  assert.equal(((await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as { status: string }).status, 'running');
+  observation = completion();
+  assert.equal(((await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as { status: string }).status, 'cancelled');
+  const result = await (await h.fetch(get(`/v1/runs/${RUN_ID}/result`))).json() as LaunchResult;
   assert.equal(result.exitReason, 'cancelled');
+  assert.equal(result.exitSignal, null);
+  assert.equal(result.exitCode, null);
+  assert.equal(result.pid, null);
+  assert.ok(result.failure);
+  assert.equal(result.failure.retryable, false);
+  assert.match(result.failure.safeSummary, /process exit unobserved/);
+  assert.deepEqual((await h.store.get(RUN_ID))?.completionObservation, observation);
+  assert.equal(h.dispatched.length, 1);
+});
+
+for (const conclusion of ['cancelled', 'failure', 'timed_out', 'success']) {
+  test(`an unclaimed orphaned workflow completed/${conclusion} finalizes as infra failure without process exit proof`, async () => {
+    const observation = { ...completion(conclusion), agentStepStarted: false };
+    const h = harness({ completion: async () => observation });
+    await h.fetch(launch(spec()));
+    const response = await h.fetch(get(`/v1/runs/${RUN_ID}/result`));
+    assert.equal(response.status, 200);
+    const result = await response.json() as LaunchResult;
+    assert.equal(result.status, 'failed');
+    assert.equal(result.exitReason, 'startup_failure');
+    assert.equal(result.exitSignal, null);
+    assert.equal(result.exitCode, null);
+    assert.equal(result.pid, null);
+    assert.ok(result.failure);
+    assert.equal(result.failure.code, 'WORKFLOW_ENDED_WITHOUT_REPORT');
+    assert.equal(result.failure.retryable, false);
+    assert.match(result.failure.safeSummary, /no claim recorded; process launch unobserved/);
+    assert.equal(((await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as { status: string }).status, 'failed');
+    assert.deepEqual((await h.store.get(RUN_ID))?.completionObservation, observation);
+    assert.equal(h.cancelled.length, 0);
+    assert.equal(h.dispatched.length, 1);
+  });
+}
+
+test('canonical job observation failure preserves unknown outcome and the sole unused claim', async () => {
+  const h = harness({ completion: async () => { throw new Error('offline'); } });
+  await h.fetch(launch(spec()));
+  const before = await h.store.get(RUN_ID);
+  assert.equal(((await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as { status: string }).status, 'accepted');
+  assert.equal((await h.fetch(get(`/v1/runs/${RUN_ID}/result`))).status, 409);
+  assert.deepEqual(await h.store.get(RUN_ID), before);
+});
+
+test('a zero-step completed GHA job cannot terminalize a claim held by an alternative recovery host', async () => {
+  const h = harness({ completion: async () => ({ ...completion(), agentStepStarted: false }) });
+  await h.fetch(launch(spec()));
+  const stored = await h.store.get(RUN_ID);
+  assert.ok(stored);
+  await h.store.claim(RUN_ID, stored.claimToken);
+  const before = await h.store.get(RUN_ID);
+  assert.equal(((await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as { status: string }).status, 'running');
+  assert.equal((await h.fetch(get(`/v1/runs/${RUN_ID}/result`))).status, 409);
+  assert.deepEqual(await h.store.get(RUN_ID), before);
+});
+
+test('missing GitHub dispatch identity cannot prove cancelled-before-dispatch', async () => {
+  const h = harness();
+  await h.fetch(launch(spec()));
+  await h.store.patch(RUN_ID, { githubRunId: null });
+  const before = await h.store.get(RUN_ID);
+  assert.deepEqual(await (await h.fetch(post(`/v1/runs/${RUN_ID}/cancel`, {}))).json(), {
+    status: 'rejected', reason: 'dispatch_outcome_unknown',
+  });
+  assert.deepEqual(await h.store.get(RUN_ID), before);
+  assert.equal(h.cancelled.length, 0);
+});
+
+test('an actual native report takes precedence over workflow completion reconciliation', async () => {
+  let observations = 0;
+  const h = harness({ completion: async () => { observations++; return completion(); } });
+  await h.fetch(launch(spec()));
+  await finish(h);
+  assert.equal(((await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as { status: string }).status, 'succeeded');
+  const result = await (await h.fetch(get(`/v1/runs/${RUN_ID}/result`))).json() as LaunchResult;
+  assert.equal(result.exitReason, 'completed');
+  assert.equal(observations, 0);
+  assert.equal((await h.store.get(RUN_ID))?.completionObservation, undefined);
 });
 
 test('cancel неизвестного рана — unknown_run', async () => {

@@ -31,3 +31,26 @@ test('branch workflow claim URL equals its owned config endpoint and checkout pi
   assert.ok(workflow.includes(`CLAIM_AUTH_TOKEN: \${{ ${condition} && secrets.INTEGRATOR_V1_CLAIM_AUTH_TOKEN || '' }}`));
   assert.ok(sandbox.includes('REQUIRE_CLAIM_AUTH = "true"'));
 });
+
+test('workflow checkout does not persist its host credential for the engine identity', () => {
+  const workflow = readFileSync('.github/workflows/run-agent.yml', 'utf8');
+  const checkoutSection = workflow.split('- name: Checkout')[1];
+  assert.ok(checkoutSection);
+  const checkout = checkoutSection.split('- name: Setup Node')[0];
+  assert.ok(checkout);
+  assert.ok(checkout.includes('ref: ${{ github.sha }}'));
+  assert.ok(checkout.includes('persist-credentials: false'));
+});
+
+test('workflow builds without dependency scripts and pins the verified engine with install scripts enabled', () => {
+  const workflow = readFileSync('.github/workflows/run-agent.yml', 'utf8');
+  assert.ok(workflow.includes("node-version: '20'"));
+  assert.ok(workflow.includes('npm ci --ignore-scripts --no-audit --no-fund && npm run build && npm test'));
+  const installSection = workflow.split('- name: Install opencode')[1];
+  assert.ok(installSection);
+  const install = installSection.split('- name: Run agent')[0];
+  assert.ok(install);
+  assert.ok(install.includes('npm install -g opencode-ai@1.18.34 --no-audit --no-fund'));
+  assert.ok(install.includes('opencode --version'));
+  assert.ok(!install.includes('--ignore-scripts'));
+});

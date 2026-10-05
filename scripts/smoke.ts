@@ -34,7 +34,9 @@ const github = {
 const store = new MemoryRunStore();
 // Порт фиксированный, а не 0: `publicBaseUrl` участвует в `pollUrl`, который
 // шлюз возвращает в ответе, и он должен совпадать с тем, куда реально можно дойти.
-const PORT = 18_787;
+// Переопределяется через SMOKE_PORT, чтобы не спорить с туннелями и сервисами,
+// которые уже заняли 18787 на машине.
+const PORT = Number(process.env['SMOKE_PORT'] ?? 18_787);
 const server = await startNodeServer({
   config: {
     workerToken: WORKER_TOKEN,

@@ -8,7 +8,8 @@
  *                  а превышение помечается `outputTruncated: true`.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { promisify } from 'node:util';
 import { redact } from '../contracts.js';
 import { buildLaunchCommand, MINIMAL_PATH, resolveBinaryAbsolute, type Identity } from './identity.js';
 
@@ -26,12 +27,14 @@ export interface ExecOptions {
   onChunk?: (stream: 'stdout' | 'stderr', text: string) => void;
   /** Обработка отмены от нашего API. */
   onSpawn?: (child: ChildProcess) => void;
+  signal?: AbortSignal;
+  cancelGraceMs?: number;
 }
 
 export interface ExecOutcome {
   exitCode: number | null;
   exitSignal: string | null;
-  exitReason: 'completed' | 'nonzero_exit' | 'timeout' | 'crash';
+  exitReason: 'completed' | 'nonzero_exit' | 'timeout' | 'crash' | 'cancelled' | 'startup_failure';
   stdout: string;
   stderr: string;
   durationMs: number;
@@ -49,7 +52,17 @@ export function capOutput(text: string, maxBytes: number): { text: string; trunc
   return { text: safeTail, truncated: true };
 }
 
-async function killTree(child: ChildProcess, signal: NodeJS.Signals): Promise<void> {
+const exec = promisify(execFile);
+
+async function killTree(child: ChildProcess, signal: NodeJS.Signals, privileged: boolean): Promise<void> {
+  if (!Number.isSafeInteger(child.pid) || child.pid! <= 0) return;
+  if (privileged) {
+    try {
+      await exec('sudo', ['-n', '/bin/kill', '-s', signal, '--', `-${child.pid}`],
+        { timeout: 1000, env: { PATH: MINIMAL_PATH } });
+      return;
+    } catch {}
+  }
   try {
     // Отрицательный pid — вся процессная группа, которую создал `detached: true`.
     process.kill(-child.pid!, signal);
@@ -64,9 +77,14 @@ async function killTree(child: ChildProcess, signal: NodeJS.Signals): Promise<vo
 
 export async function runAgent(options: ExecOptions): Promise<ExecOutcome> {
   const startedAt = Date.now();
+  const unstarted = (): ExecOutcome => ({ exitCode: null, exitSignal: null, exitReason: 'startup_failure',
+    stdout: '', stderr: 'host cancellation before agent spawn', durationMs: Date.now() - startedAt,
+    timedOut: false, outputTruncated: false });
+  if (options.signal?.aborted) return unstarted();
   // Бинарь резолвится заранее: у агента будет `env -i` с минимальным PATH, а opencode
   // в GHA лежит в tool cache, которого в этом наборе нет.
   const binary = (await resolveBinaryAbsolute(options.binary)) ?? options.binary;
+  if (options.signal?.aborted) return unstarted();
   const { command, argv } = buildLaunchCommand({
     identity: options.identity,
     binary,
@@ -82,8 +100,6 @@ export async function runAgent(options: ExecOptions): Promise<ExecOutcome> {
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-
-  options.onSpawn?.(child);
 
   let stdout = '';
   let stderr = '';
@@ -117,29 +133,47 @@ export async function runAgent(options: ExecOptions): Promise<ExecOutcome> {
   child.stderr?.on('data', (chunk: Buffer) => onStream('stderr', chunk));
 
   let timedOut = false;
+  let cancelled = false;
+  let spawnFailed = false;
+  let escalation: ReturnType<typeof setTimeout> | undefined;
+  const stop = (graceMs: number): void => {
+    void killTree(child, 'SIGTERM', options.identity.enforced);
+    escalation ??= setTimeout(() => void killTree(child, 'SIGKILL', options.identity.enforced),
+      graceMs);
+  };
+  const cancel = (): void => {
+    if (cancelled || timedOut) return;
+    cancelled = true;
+    stop(Math.max(1, Math.min(5000, options.cancelGraceMs ?? 1000)));
+  };
   const timer = setTimeout(() => {
+    if (cancelled) return;
     timedOut = true;
-    void killTree(child, 'SIGTERM');
-    setTimeout(() => void killTree(child, 'SIGKILL'), 5000).unref();
+    stop(5000);
   }, options.timeoutMs);
 
   const settled = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
     child.once('error', (error) => {
-      clearTimeout(timer);
-      // `spawn` не смог создать процесс — это startup_failure, а не nonzero_exit.
-      resolve({ code: null, signal: null });
+      spawnFailed = true;
       stderr += `\nspawn error: ${error.message}`;
     });
     child.once('close', (code, signal) => {
       clearTimeout(timer);
-      resolve({ code, signal });
+      resolve(spawnFailed ? { code: null, signal: null } : { code, signal });
     });
+    options.signal?.addEventListener('abort', cancel, { once: true });
+    if (options.signal?.aborted) cancel();
+    options.onSpawn?.(child);
   });
+  if (escalation) clearTimeout(escalation);
+  options.signal?.removeEventListener('abort', cancel);
 
   const durationMs = Date.now() - startedAt;
 
   let exitReason: ExecOutcome['exitReason'];
-  if (timedOut) exitReason = 'timeout';
+  if (spawnFailed) exitReason = 'startup_failure';
+  else if (cancelled && (settled.code !== null || settled.signal !== null)) exitReason = 'cancelled';
+  else if (timedOut) exitReason = 'timeout';
   else if (settled.signal !== null) exitReason = 'crash';
   else if (settled.code === 0) exitReason = 'completed';
   else exitReason = 'nonzero_exit';

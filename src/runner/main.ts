@@ -43,6 +43,7 @@ import { installAgentConfigUnderIdentity } from './agent-config.js';
 import { uploadSessionLog, type LogUploadMode } from './logs.js';
 import { agentOutputFormat, extractAnswer } from './answer.js';
 import { buildAgentArgs, declaredOutputFailure } from './finalization.js';
+import { installHostCancellation, singleReport } from './cancellation.js';
 
 const exec = promisify(execFile);
 
@@ -102,15 +103,16 @@ class SessionLog {
   }
 }
 
-async function report(url: string, reportToken: string, result: LaunchResult): Promise<void> {
+async function report(url: string, reportToken: string, result: LaunchResult, timeoutMs = 5000): Promise<void> {
   const response = await fetch(url, {
     method: 'POST',
+    redirect: 'error',
+    signal: AbortSignal.timeout(timeoutMs),
     headers: { authorization: `Bearer ${reportToken}`, 'content-type': 'application/json' },
     body: JSON.stringify(result),
   });
   if (!response.ok) {
-    const text = redact(await response.text(), reportToken).slice(0, 300);
-    logLine(`report rejected (${response.status}): ${text}`);
+    logLine(`report rejected (${response.status})`);
     return;
   }
   logLine(`result reported: exitReason=${result.exitReason} artifacts=${result.artifacts.length}`);
@@ -405,6 +407,13 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
   const sessionLog = new SessionLog();
   let claim: ClaimPayload | null = null;
   let identity: Identity | null = null;
+  let observedOutcome: ExecOutcome | null = null;
+  const cancellation = installHostCancellation();
+  const reportResult = singleReport(async result => {
+    if (!claim) throw new Error('report credential unavailable');
+    await report(`${gatewayUrl}${REPORT_PATH(runId)}`, claim.reportToken, result,
+      cancellation.signal.aborted ? 2000 : 5000);
+  });
 
   try {
     // ── 1. claim ──────────────────────────────────────────────────────────────
@@ -423,9 +432,6 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     }
     claim = (await claimResponse.json()) as ClaimPayload;
     const spec = claim.spec;
-    const reportUrl = `${gatewayUrl}${REPORT_PATH(runId)}`;
-    // Локальная копия: в замыкании narrowing по `claim` не работает.
-    const reportToken = claim.reportToken;
     const mcpSecrets = spec.mcpSecrets ?? {};
     const secrets = [claim.llmKey, env.ARTIFACTS_TOKEN, claimAuthToken, ...Object.values(mcpSecrets)];
 
@@ -437,9 +443,11 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
      * и однажды его забудут.
      */
     const refuse = async (f: Failure, exit: number): Promise<number> => {
-      await report(reportUrl, reportToken, emptyResult(runId, spec.repository, { failure: f }));
+      await reportResult(emptyResult(runId, spec.repository, { failure: f }));
       return exit;
     };
+    if (cancellation.signal.aborted) return refuse(
+      failure('AGENT_CANCELLED_BEFORE_START', 'preflight', 'host cancellation before agent spawn'), RUNNER_EXIT.agentFailed);
 
     // ── 2. preflight: бинарь агента и изоляция ─────────────────────────────────
     if (!(await isBinaryAvailable(claim.agentBinary))) {
@@ -517,9 +525,19 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       timeoutMs: clampTimeout(spec.limits.timeoutMs),
       maxOutputBytes: spec.limits.maxOutputBytes,
       secrets,
+      signal: cancellation.signal,
       onChunk: (stream, text) => sessionLog.append(stream, text),
     });
+    observedOutcome = outcome;
     logLine(`agent exitReason=${outcome.exitReason} duration=${outcome.durationMs}ms truncated=${outcome.outputTruncated}`);
+    if (outcome.exitReason === 'cancelled') {
+      await reportResult(buildLaunchResult({ runId, outcome, answer: { source: null }, artifacts: [],
+        repo: { fullName: spec.repository.fullName, branch: spec.repository.branch, commit: NULL_SHA },
+        logUrl: '', outputTruncated: outcome.outputTruncated }));
+      return RUNNER_EXIT.agentFailed;
+    }
+    if (cancellation.signal.aborted && outcome.exitReason === 'startup_failure') return refuse(
+      failure('AGENT_CANCELLED_BEFORE_START', 'preflight', 'host cancellation before agent spawn'), RUNNER_EXIT.agentFailed);
 
     // ── 5. артефакты в репозиторий юзера ───────────────────────────────────────
     const collected = await collectArtifacts(workspace, spec.outputs);
@@ -571,24 +589,29 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       missingOutputs: collected.missing,
       publicationFailed: published.note !== null,
     });
-    await report(reportUrl, claim.reportToken, result);
+    await reportResult(result);
     return result.exitReason === 'completed' ? RUNNER_EXIT.ok : RUNNER_EXIT.agentFailed;
   } catch (cause) {
     const safeSummary = redact(cause instanceof Error ? cause.message : String(cause), claim?.llmKey, claimToken, claimAuthToken);
     logLine(`runner crashed: ${safeSummary}`);
     if (claim) {
-      await report(
-        `${gatewayUrl}${REPORT_PATH(runId)}`,
-        claim.reportToken,
-        emptyResult(runId, claim.spec.repository, {
+      try {
+        await reportResult(emptyResult(runId, claim.spec.repository, {
           failure: failure('WORKER_INTERNAL', 'finalization', safeSummary),
           stderr: safeSummary,
-        }),
-      );
+          ...(observedOutcome?.exitReason === 'cancelled' ? { status: 'started',
+            exitReason: 'cancelled', exitCode: observedOutcome.exitCode, exitSignal: observedOutcome.exitSignal,
+            durationMs: observedOutcome.durationMs } : {}),
+        }));
+      } catch {}
     }
     return RUNNER_EXIT.crashed;
   } finally {
-    if (identity) await destroyRunIdentity(identity);
+    try {
+      if (identity) await destroyRunIdentity(identity);
+    } finally {
+      cancellation.dispose();
+    }
   }
 }
 

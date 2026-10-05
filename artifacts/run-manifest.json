@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "runId": "run_32529163-9821-4805-81a4-69761cb12ed0",
+  "jobId": "job_49e83261-3f6a-46ee-9413-1bda44070f85",
+  "exitReason": "completed",
+  "exitCode": 0,
+  "durationMs": 182832,
+  "artifacts": [
+    {
+      "path": "artifacts/outputs/category-results.csv",
+      "name": "Category totals",
+      "mime": "text/csv",
+      "sha256": "8072bf3523ee80345e5a10a08070f0d50779c65cb5d3b611702cbab39ea95da6",
+      "size": 35
+    }
+  ],
+  "missingOutputs": [],
+  "startedAt": "2026-10-05T11:04:48.979Z",
+  "finishedAt": "2026-10-05T11:08:36.080Z"
+}

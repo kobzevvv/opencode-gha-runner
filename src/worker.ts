@@ -4,6 +4,7 @@
  */
 
 import { createGateway } from './gateway/app.js';
+import { parseRing } from './gateway/ring.js';
 import { KvRunStore, type KvLike } from './gateway/store.js';
 
 export interface Env {
@@ -19,6 +20,8 @@ export interface Env {
   ZEN_RING_URL?: string;
   /** Админ-токен кольца — только им читается `/zen/ring/payload`. */
   ZEN_RING_ADMIN_TOKEN?: string;
+  /** Статическое кольцо `[{repo, token}]` — секрет, потому что в нём токены. */
+  RING_TARGETS?: string;
 }
 
 export default {
@@ -36,6 +39,9 @@ export default {
         githubToken: env.GITHUB_TOKEN,
         zenRingUrl: env.ZEN_RING_URL,
         zenRingAdminToken: env.ZEN_RING_ADMIN_TOKEN,
+        // Статическое кольцо приходит **секретом**, а не переменной: в нём токены
+        // репозиториев, а переменные воркера читаются в дашборде как обычный текст.
+        ...(env.RING_TARGETS ? { ringTargets: parseRing(env.RING_TARGETS) } : {}),
       },
       store: new KvRunStore(env.RUNS),
       // Тот же KV держит курсор round-robin и кэш кольца: запросы попадают в разные

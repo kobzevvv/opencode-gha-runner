@@ -280,6 +280,60 @@ test('пустое кольцо откатывается на репозитор
   assert.deepEqual(h.dispatched.map((d) => d.target), ['fallback/repo']);
 });
 
+// ── имя workflow у цели ─────────────────────────────────────────────────────────
+
+/**
+ * Настоящий `GitHubClient` с перехватом fetch: здесь важно, в какой URL ушёл диспатч,
+ * а мок клиента в `ringGateway` этот URL вообще не строит.
+ */
+function dispatchUrls(ring: RingTarget[], configWorkflow = 'run-agent.yml'): Promise<string[]> {
+  const urls: string[] = [];
+  const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+    urls.push(String(url));
+    if (init?.method === 'POST') return new Response(null, { status: 204 });
+    // Ветка резолвится отдельным вызовом `/repos/{repo}`, а прогоны берутся списком.
+    // Оба ответа отдаёт один объект: тесту важен URL, а не содержимое.
+    return new Response(JSON.stringify({ default_branch: 'main', workflow_runs: [] }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const app = createGateway({
+    config: {
+      workerToken: 'wt',
+      repo: 'fallback/repo',
+      workflow: configWorkflow,
+      publicBaseUrl: 'https://worker.example',
+      agentBinary: 'opencode',
+      githubToken: 'fallback-token',
+      ringTargets: ring,
+    },
+    store: new MemoryRunStore(),
+    ring: new Ring({ targets: ring, kv: memoryKv() }),
+    kv: memoryKv(),
+    fetchImpl,
+  });
+  return app.fetch(launch('run_1', 'op_1')).then(() => urls);
+}
+
+test('в цель кольца диспатчим workflow с именем репозитория', async () => {
+  // Общий `run-agent.yml` в репозитории кольца не существует: провижн кладёт файл под
+  // именем репозитория. С общим именем GitHub отвечал бы 422 на каждом запуске.
+  const urls = await dispatchUrls([A]);
+  assert.ok(
+    urls.some((u) => u === 'https://api.github.com/repos/a/one/actions/workflows/one.yml/dispatches'),
+    `диспатч должен идти в one.yml, а не в run-agent.yml: ${urls.join(', ')}`,
+  );
+});
+
+test('явное имя workflow в цели важнее имени репозитория', async () => {
+  const urls = await dispatchUrls([{ repo: 'a/one', token: 't1', workflow: 'agent.yml' }]);
+  assert.ok(urls.some((u) => u.endsWith('/repos/a/one/actions/workflows/agent.yml/dispatches')), urls.join(', '));
+});
+
+test('fallback-репозиторий раннера диспатчит свой workflow из конфига', async () => {
+  // Это не цель кольца, а сам репозиторий раннера: у него файл называется как в конфиге.
+  const urls = await dispatchUrls([], 'run-agent.yml');
+  assert.ok(urls.some((u) => u.endsWith('/repos/fallback/repo/actions/workflows/run-agent.yml/dispatches')), urls.join(', '));
+});
+
 test('токен цели не остаётся в записи рана после завершения', async () => {
   const h = ringGateway([A]);
   await h.fetch(launch('run_1', 'op_1'));

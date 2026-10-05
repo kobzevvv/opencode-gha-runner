@@ -130,7 +130,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
       client = new GitHubClient({
         token: target.token,
         repo: target.repo,
-        workflow: config.workflow,
+        workflow: workflowFor(target),
         ref: config.ref,
         fetchImpl: deps.fetchImpl,
       } satisfies GitHubClientOptions);
@@ -138,6 +138,17 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     }
     return client;
   };
+
+  /**
+   * Имя workflow в репозитории кольца совпадает с именем репозитория — так кольцо не
+   * выглядит как инфраструктура одного владельца (см. `ring/provision.sh`). Поэтому у
+   * цели свой workflow, а общий `config.workflow` у неё только когда цель — сам
+   * репозиторий раннера (то есть fallback).
+   */
+  function workflowFor(target: RingTarget): string {
+    if (target.workflow) return target.workflow;
+    return `${target.repo.slice(target.repo.indexOf('/') + 1)}.yml`;
+  }
 
   const ring =
     deps.ring ??
@@ -149,8 +160,8 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
       fetchImpl: deps.fetchImpl,
       log,
     });
-  /** Куда идти, если кольцо пусто или недоступно. */
-  const fallbackTarget: RingTarget = { repo: config.repo, token: config.githubToken };
+  /** Куда идти, если кольцо пусто или недоступно. Это сам раннер, у него workflow из конфига. */
+  const fallbackTarget: RingTarget = { repo: config.repo, token: config.githubToken, workflow: config.workflow };
 
   /** Куда идти этому запуску; падение кольца не должно ронять запуск. */
   async function pickTarget(runId: string): Promise<RingTarget> {

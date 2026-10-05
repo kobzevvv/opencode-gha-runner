@@ -15,6 +15,7 @@
  * ключом LLM.
  */
 
+import { isSafeWorkflowName } from '../contracts.js';
 import type { KvLike } from './store.js';
 
 export interface RingTarget {
@@ -22,6 +23,12 @@ export interface RingTarget {
   repo: string;
   /** Токен с правом `workflow` в этом репозитории. */
   token: string;
+  /**
+   * Имя workflow в этом репозитории. Пусто — берётся имя репозитория с `.yml`, потому
+   * что `ring/provision.sh` кладёт файл именно под таким именем. Явное значение нужно
+   * только когда провижн делался по-другому.
+   */
+  workflow?: string;
 }
 
 const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
@@ -62,7 +69,13 @@ export function parseRing(input: unknown): RingTarget[] {
     rows = wrapper['repos'] ?? wrapper['targets'] ?? [];
   }
   if (!Array.isArray(rows)) return [];
-  return rows.filter(isTarget).map((row) => ({ repo: row.repo, token: row.token }));
+  return rows.filter(isTarget).map((row) => ({
+    repo: row.repo,
+    token: row.token,
+    // Негодное имя workflow молча игнорируем: цель остаётся целью, а имя возьмётся из
+    // имени репозитория. Отбрасывать всю строку из-за одного поля смысла нет.
+    ...(isSafeWorkflowName(row.workflow) ? { workflow: row.workflow } : {}),
+  }));
 }
 
 export interface RingOptions {

@@ -2,8 +2,8 @@
  * Кольцо репозиториев, между которыми воркер раскидывает запуски агента.
  *
  * Зачем: один репозиторий GitHub Actions — это один потолок одновременных джоб (20 на
- * аккаунт) и один egress-адрес. Кольцо из N репозиториев даёт N таких потолков, а
- * round-robin не даёт одному репозиторию выгореть.
+ * аккаунт) и один egress-адрес. Кольцо из N репозиториев даёт N таких потолков, при
+ * условии что запуски действительно расходятся по репозиториям.
  *
  * Источник кольца — воркер `zen-rings` (D1-таблица `zen_repos`, `GET /zen/ring/payload`),
  * тот же, которым пользуется LLM-пул. Читать его можно только админ-токеном кольца,
@@ -80,20 +80,30 @@ export interface RingOptions {
   log?: (message: string, fields?: Record<string, unknown>) => void;
 }
 
-const CURSOR_KEY = 'rr:cursor';
 const CACHE_KEY = 'ring:cache';
 
 /**
- * Кольцо с round-robin.
+ * Кольцо: цель запуска выбирается по самому `runId`, без общего состояния.
  *
- * Курсор лежит в общем KV, а не в памяти изолята: запросы воркера попадают в разные
- * изоляты, и счётчик в памяти возвращал бы к первому репозиторию на каждом холодном
- * старте. KV не транзакционен, поэтому два одновременных запуска могут выбрать один
- * репозиторий — для балансировки это безвредно (дублируется выбор, а не ран).
+ * Раньше здесь был курсор round-robin в KV (`rr:cursor`). Он не работает: Cloudflare KV
+ * итеретивно непоследователен, поэтому `get` возвращает устаревшее значение, и параллельные
+ * `launch` (5 штук на живом замере 05.10.2026) читали одно и то же — все пять ушли в
+ * `recruiting-me/runs`. Кольцо существует ради умножения потолка параллельных джоб, и именно
+ * при параллельной нагрузке оно не работало.
+ *
+ * Теперь индекс — хеш `runId` по модулю размера кольца. Свойства ровно те, что нужны:
+ *   - разные `runId` расходятся по кольцу, параллельные запуски не сливаются;
+ *   - один и тот же `runId` всегда даёт ту же цель, поэтому отмена и поиск осиротевшего
+ *     прогона идут туда же, куда ушёл запуск (это требование дедупликации);
+ *   - состояния нет — значит, нечему гоняться между изолятами и нечего терять при
+ *     холодном старте.
+ *
+ * Чего это не даёт: строгого чередования. Два запуска подряд могут уйти в одну цель, и
+ * при малом кольце это вероятно. Для балансировки по времени это неважно — важно, чтобы
+ * одновременные запуски не попали в одну цель, а это обеспечено.
  */
 export class Ring {
   private readonly options: RingOptions;
-  private memoryCursor = 0;
   private cached: RingTarget[] | null = null;
   private cachedAt = 0;
 
@@ -179,42 +189,33 @@ export class Ring {
   }
 
   /**
-   * Следующая цель по циклу.
-   *
-   * Курсор сдвигается на каждой выдаче, поэтому следующий запуск уходит в следующий
-   * репозиторий. `null` — кольцо пусто, вызывающий откатывается на конфиг.
+   * Цель для запуска `seed` (это `runId`). `null` — кольцо пусто, вызывающий откатывается
+   * на конфиг.
    */
-  async next(): Promise<RingTarget | null> {
+  async next(seed: string): Promise<RingTarget | null> {
     const targets = await this.targets();
     if (targets.length === 0) return null;
 
-    const cursor = await this.nextCursor();
-    const target = targets[cursor % targets.length]!;
-    this.log('ring pick', { repo: target.repo, cursor: cursor % targets.length, size: targets.length });
+    const index = indexForSeed(seed, targets.length);
+    const target = targets[index]!;
+    this.log('ring pick', { repo: target.repo, index, size: targets.length, seed });
     return target;
   }
+}
 
-  /**
-   * Индекс цели для ЭТОЙ выдачи (0-based) и сдвиг курсора на следующую.
-   *
-   * Возвращается именно текущее значение, а не следующее: иначе первый запуск после
-   * пустого курсора уходил бы во вторую репозиторию кольца, а первая не получала бы
-   * работы никогда.
-   */
-  private async nextCursor(): Promise<number> {
-    const kv = this.options.kv;
-    if (!kv) {
-      return this.memoryCursor++;
-    }
-    try {
-      const raw = await kv.get(CURSOR_KEY, 'text');
-      const parsed = raw ? Number.parseInt(raw, 10) : 0;
-      const current = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
-      await kv.put(CURSOR_KEY, String(current + 1));
-      return current;
-    } catch (cause) {
-      this.log('ring cursor read failed', { error: cause instanceof Error ? cause.message : String(cause) });
-      return this.memoryCursor++;
-    }
+/**
+ * Индекс цели по `runId`.
+ *
+ * FNV-1a: арифметика на 32-битных целых, без `bitwise`-операций со знаком — в JS
+ * `x << 0` для больших значений даёт отрицательное число, и остаток от деления на
+ * длину кольца вышел бы отрицательным. Хеш берётся по модулю 2^32 через `>>> 0`.
+ */
+function indexForSeed(seed: string, size: number): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash ^= seed.charCodeAt(i);
+    // 16777619 — простое 2^32 по модулю; умножение держим в пределах 2^53 через Math.imul.
+    hash = Math.imul(hash, 0x01000193) >>> 0;
   }
+  return (hash >>> 0) % size;
 }

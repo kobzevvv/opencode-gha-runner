@@ -12,9 +12,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { AGENT_CONFIG_TEMPLATE, installAgentConfig, renderAgentConfig } from '../src/runner/agent-config.js';
-import { failure } from '../src/contracts.js';
+import { failure, isRetryableCode } from '../src/contracts.js';
 import { collectArtifacts } from '../src/runner/artifacts.js';
-import { buildLaunchResult } from '../src/runner/main.js';
+import { buildLaunchResult, failureForOutcome } from '../src/runner/main.js';
 import { capOutput, resolveAgentEnv, runAgent } from '../src/runner/exec.js';
 import { buildChildPath, buildLaunchCommand, ensureTraversable, identityName, parentDirs, type Identity } from '../src/runner/identity.js';
 
@@ -568,4 +568,46 @@ test('failure появляется только когда он есть', () =>
   assert.ok(!('failure' in buildLaunchResult(base)));
   const withFailure = buildLaunchResult({ ...base, failure: failure('AGENT_NONZERO_EXIT', 'engine', 'упал') });
   assert.equal(withFailure.failure?.code, 'AGENT_NONZERO_EXIT');
+});
+
+// ── отказ финализации: выходы не извлекаемы ───────────────────────────────────
+
+test('агент отработал, выходы не закоммитились — это отказ, а не успех без выходов', () => {
+  // Живой дефект 05.10.2026: токен публикации не имел прав на репозиторий задачи, коммит
+  // падал, и рапорт уходил как `completed artifacts=0`. Клиент получал успех без файлов.
+  const result = failureForOutcome('completed', [], 'artifact push failed: could not create branch agent-run/run_x');
+  assert.equal(result?.code, 'ARTIFACTS_PUSH_FAILED');
+  assert.equal(result?.failureClass, 'finalization');
+  assert.match(result!.safeSummary, /could not create branch/);
+});
+
+test('агент не создал объявленные выходы — это тоже отказ финализации', () => {
+  const result = failureForOutcome('completed', ['report.md'], null);
+  assert.equal(result?.code, 'ARTIFACTS_PUSH_FAILED');
+  assert.match(result!.safeSummary, /report\.md/);
+});
+
+test('всё сложилось: отказа нет', () => {
+  assert.equal(failureForOutcome('completed', [], null), undefined);
+});
+
+test('отказ движка важнее отказа финализации', () => {
+  // Агент упал по своим причинам — клиенту нужен этот код, а не «выходы не легли» поверх.
+  for (const [exitReason, code] of [
+    ['timeout', 'AGENT_TIMEOUT'],
+    ['crash', 'AGENT_CRASH'],
+    ['nonzero_exit', 'AGENT_NONZERO_EXIT'],
+  ] as const) {
+    const result = failureForOutcome(exitReason, ['report.md'], 'artifact push failed: нет прав');
+    assert.equal(result?.code, code, exitReason);
+  }
+});
+
+test('ARTIFACTS_PUSH_FAILED не retryable: повтор с тем же токеном повторит тот же отказ', () => {
+  assert.equal(isRetryableCode('ARTIFACTS_PUSH_FAILED'), false);
+  assert.equal(isRetryableCode('ARTIFACTS_TOKEN_UNSET'), false);
+  // А вот эти по-прежнему повторяются — правки не должны ломать прежнюю политику.
+  assert.equal(isRetryableCode('AGENT_TIMEOUT'), true);
+  assert.equal(isRetryableCode('AGENT_CRASH'), true);
+  assert.equal(isRetryableCode('WORKER_INTERNAL'), true);
 });

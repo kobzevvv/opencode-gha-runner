@@ -105,6 +105,20 @@ export interface LaunchRequest {
    */
   repository: { fullName: string; branch: string };
   /**
+   * Токен публикации: клон `repository.fullName` и коммит выходов в его ветку.
+   *
+   * Зачем он в запросе, а не только в `ARTIFACTS_TOKEN` репозитория кольца: джоба
+   * запускается в чужом репозитории (кольцо), и токен этого репозитория по построению
+   * не имеет прав на репозиторий задачи. На живом замере 05.10.2026 из 16 запусков
+   * артефакты легли в 1: остальные пятнадцать честно отработали и уехали без выходов.
+   *
+   * Приходит в claim-ответе, а не в `inputs` диспатча: `workflow_dispatch` публичного
+   * репозитория показывает inputs в метаданных прогона и в логах, то есть токен в
+   * inputs — это утечка в мир. Пусто или не прислано — джоба падает на preflight
+   * (`ARTIFACTS_TOKEN_UNSET`), а не публикует куда попало.
+   */
+  publicationToken?: string;
+  /**
    * Куда воркер отдаёт `LaunchResult` этого рана: `POST {resultUrl}` с тем же общим секретом
    * в `Authorization`, которым аутентифицировали launch. Адрес приходит в запросе, поэтому
    * воркеру не нужно знать, где живёт наш API.
@@ -215,11 +229,22 @@ export const FAILURE_CODES = [
   // быть кода `AGENT_STARTUP_FAILED` — это разные вещи, и наш API по retryable-флагу
   // принял бы решение «повторить» там, где повтор бессмыслен.
   'AGENT_NONZERO_EXIT',
+  // Добавлено воркером: публикация объявленных выходов — часть успеха. Раньше ран с
+  // недоехавшими артефактами уходил как `completed artifacts=0`, и клиент получал успех
+  // без единого файла. На живом замере 05.10.2026 так ушли 15 запусков из 16.
+  'ARTIFACTS_PUSH_FAILED',
+  // Токена публикации не пришло: клон и коммит нечем делать. Префлайт, агент не идёт.
+  'ARTIFACTS_TOKEN_UNSET',
 ] as const;
 
 export type FailureCode = (typeof FAILURE_CODES)[number];
 
-/** Коды, при которых наш API имеет право повторить запуск. */
+/**
+ * Коды, при которых наш API имеет право повторить запуск.
+ *
+ * `ARTIFACTS_PUSH_FAILED` здесь нет намеренно: повтор с тем же токеном повторит тот же
+ * же отказ по правам, а новый токен — это новый `operationId`, то есть работа клиента.
+ */
 const RETRYABLE: ReadonlySet<string> = new Set([
   'AGENT_STARTUP_FAILED',
   'AGENT_TIMEOUT',
@@ -456,6 +481,16 @@ export function validateLaunchRequest(input: unknown): LaunchRequest {
     // сталкивается с ветками юзера. Воркер обязан коммитить именно сюда.
     if (!isSafeBranchName(req['repository']['branch'])) {
       issues.push('repository.branch: expected a safe git branch name');
+    }
+  }
+
+  // Токен публикации: пустой не значит «дефолтный», а значит «прав нет» — такое лучше
+  // отвергнуть на входе, чем гонять агента и молча не положить выходы.
+  if (req['publicationToken'] !== undefined) {
+    if (typeof req['publicationToken'] !== 'string' || req['publicationToken'].length < 8) {
+      issues.push('publicationToken: expected a string of at least 8 chars');
+    } else if (req['publicationToken'].length > 500) {
+      issues.push('publicationToken: longer than 500');
     }
   }
 

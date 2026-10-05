@@ -143,7 +143,7 @@ export class MemoryRunStore implements RunStore {
     run.updatedAt = Date.now();
     // Ключ LLM больше не нужен: джоба получила его на claim, результат она уже послала.
     // Токен цели — тоже: отменять и искать уже нечего.
-    run.request = { ...run.request, env: {}, credentials: undefined };
+    run.request = { ...run.request, env: {}, credentials: undefined, publicationToken: undefined };
     run.target = { repo: run.target.repo, token: '' };
     return true;
   }
@@ -222,7 +222,7 @@ export class KvRunStore implements RunStore {
     run.result = result;
     run.phase = 'done';
     run.updatedAt = Date.now();
-    run.request = { ...run.request, env: {}, credentials: undefined };
+    run.request = { ...run.request, env: {}, credentials: undefined, publicationToken: undefined };
     run.target = { repo: run.target.repo, token: '' };
     await this.kv.put(runKey(runId), JSON.stringify(run), { expirationTtl: this.ttlSeconds });
     return true;

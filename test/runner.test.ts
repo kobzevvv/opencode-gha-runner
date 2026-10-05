@@ -14,7 +14,7 @@ import { test } from 'node:test';
 import { AGENT_CONFIG_TEMPLATE, installAgentConfig, renderAgentConfig, withAgentConfigSpool } from '../src/runner/agent-config.js';
 import { failure } from '../src/contracts.js';
 import { collectArtifacts } from '../src/runner/artifacts.js';
-import { buildLaunchResult, emptyResult } from '../src/runner/main.js';
+import { buildLaunchResult, emptyResult, prepareAgentConfig, RUNNER_EXIT } from '../src/runner/main.js';
 import { capOutput, resolveAgentEnv, runAgent } from '../src/runner/exec.js';
 import { buildChildPath, buildLaunchCommand, ensureTraversable, identityName, MINIMAL_PATH, parentDirs, type Identity } from '../src/runner/identity.js';
 
@@ -570,15 +570,20 @@ test('startup failure includes an empty answer on the JSON wire', () => {
   assert.equal(JSON.parse(JSON.stringify(emptyResult('run_1', { fullName: 'o/r', branch: 'b' }, { answer: undefined }))).answer, '');
 });
 
-test('reference-only config spool stays traversable under umask 077 and is removed', async () => {
+test('config spool keeps literal credentials owner-only under umask 077 and is removed', async () => {
   const previous = process.umask(0o077);
   let staging = '';
   try {
-    await withAgentConfigSpool('{"apiKey":"{env:MODEL_KEY}"}', async (target) => {
+    const owner = { uid: process.getuid!(), gid: process.getgid!() };
+    const rendered = '{"mcp":{"headers":{"Authorization":"Bearer fixture-sensitive-value"}}}';
+    await withAgentConfigSpool(rendered, owner, async (target) => {
       staging = target;
-      assert.equal((await stat(path.dirname(target))).mode & 0o777, 0o755);
-      assert.equal((await stat(target)).mode & 0o777, 0o644);
-      assert.equal(readFileSync(target, 'utf8'), '{"apiKey":"{env:MODEL_KEY}"}');
+      assert.equal((await stat(path.dirname(target))).mode & 0o777, 0o711);
+      const file = await stat(target);
+      assert.equal(file.mode & 0o777, 0o600);
+      assert.equal(file.uid, owner.uid);
+      assert.equal(file.gid, owner.gid);
+      assert.equal(readFileSync(target, 'utf8'), rendered);
     });
     await assert.rejects(stat(staging), { code: 'ENOENT' });
   } finally {
@@ -588,11 +593,45 @@ test('reference-only config spool stays traversable under umask 077 and is remov
 
 test('config spool is removed when identity-side installation fails', async () => {
   let staging = '';
-  await assert.rejects(withAgentConfigSpool('{}', async (target) => {
+  await assert.rejects(withAgentConfigSpool('{}', { uid: process.getuid!(), gid: process.getgid!() }, async (target) => {
     staging = target;
     throw new Error('identity write refused');
   }), /identity write refused/);
   await assert.rejects(stat(staging), { code: 'ENOENT' });
+});
+
+test('config spool refuses invalid identity before exposing any contents', async () => {
+  await assert.rejects(withAgentConfigSpool('{}', { uid: -1, gid: 0 }, async () => {}), /Invalid config spool identity/);
+});
+
+test('required config failure refuses startup with an empty wire answer and no exception disclosure', async () => {
+  for (const mode of [undefined, 'template']) {
+    let installations = 0;
+    const prepared = await prepareAgentConfig(mode, async () => {
+      installations++;
+      throw new Error('Bearer fixture-sensitive-value');
+    });
+    assert.equal(installations, 1);
+    assert.equal(prepared.ok, false);
+    if (prepared.ok) assert.fail('configuration failure must refuse');
+    assert.equal(prepared.exit, RUNNER_EXIT.preflightRefused);
+    const result = JSON.parse(JSON.stringify(emptyResult('run_1', { fullName: 'o/r', branch: 'b' }, { failure: prepared.failure })));
+    assert.equal(result.answer, '');
+    assert.equal(result.status, 'failed');
+    assert.equal(result.exitReason, 'startup_failure');
+    assert.equal(result.failure.code, 'AGENT_STARTUP_FAILED');
+    assert.equal(result.failure.failureClass, 'preflight');
+    assert.ok(!JSON.stringify(result).includes('fixture-sensitive-value'));
+  }
+});
+
+test('config preparation preserves explicit skip and successful installation', async () => {
+  let installations = 0;
+  const install = async () => { installations++; return '/home/fixture/opencode.json'; };
+  assert.deepEqual(await prepareAgentConfig('skip', install), { ok: true, value: '' });
+  assert.equal(installations, 0);
+  assert.deepEqual(await prepareAgentConfig('template', install), { ok: true, value: '/home/fixture/opencode.json' });
+  assert.equal(installations, 1);
 });
 
 test('failure появляется только когда он есть', () => {

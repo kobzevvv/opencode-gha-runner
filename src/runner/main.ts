@@ -177,6 +177,19 @@ async function cloneWorkspace(
 /** Шаг, который может отказать до старта агента. */
 type Step<T> = { ok: true; value: T } | { ok: false; failure: Failure; exit: number };
 
+export async function prepareAgentConfig(mode: string | undefined, install: () => Promise<string>): Promise<Step<string>> {
+  if (mode === 'skip') return { ok: true, value: '' };
+  try {
+    return { ok: true, value: await install() };
+  } catch {
+    return {
+      ok: false,
+      failure: failure('AGENT_STARTUP_FAILED', 'preflight', 'Required agent configuration could not be installed'),
+      exit: RUNNER_EXIT.preflightRefused,
+    };
+  }
+}
+
 interface PreparedWorkspace {
   identity: Identity;
   workspace: string;
@@ -478,20 +491,17 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
 
     // Провайдер агента: без этого opencode ушёл бы в свой дефолтный и упал бы на
     // авторизации уже после старта — как `nonzero_exit`, а не как preflight-отказ.
-    // Отказ здесь не фатален: без конфига агент упадёт с кодом, и это видно в ответе.
-    if (env.AGENT_CONFIG !== 'skip') {
-      try {
-        agentConfigPath = await installAgentConfigUnderIdentity({
-          identity: identityOfRun,
-          llmKeyEnvName: claim.llmKeyEnvName,
-          mcpServers: spec.mcp?.servers,
-        });
-        const mcpCount = Object.keys(spec.mcp?.servers ?? {}).length;
-        logLine(`agent config installed: ${agentConfigPath}${mcpCount > 0 ? ` (mcp servers: ${mcpCount})` : ''}`);
-      } catch (cause) {
-        const safeSummary = redact(cause instanceof Error ? cause.message : String(cause));
-        logLine(`agent config not installed: ${safeSummary}`);
-      }
+    const configKeyEnvName = claim.llmKeyEnvName;
+    const configured = await prepareAgentConfig(env.AGENT_CONFIG, () => installAgentConfigUnderIdentity({
+      identity: identityOfRun,
+      llmKeyEnvName: configKeyEnvName,
+      mcpServers: spec.mcp?.servers,
+    }));
+    if (!configured.ok) return refuse(configured.failure, configured.exit);
+    agentConfigPath = configured.value;
+    if (agentConfigPath) {
+      const mcpCount = Object.keys(spec.mcp?.servers ?? {}).length;
+      logLine(`agent config installed: ${agentConfigPath}${mcpCount > 0 ? ` (mcp servers: ${mcpCount})` : ''}`);
     }
 
     // ── 4. запуск агента ───────────────────────────────────────────────────────

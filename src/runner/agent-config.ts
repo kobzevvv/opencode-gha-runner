@@ -21,7 +21,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -105,13 +105,24 @@ export async function installAgentConfig(options: {
 
 const exec = promisify(execFile);
 
-export async function withAgentConfigSpool<Result>(rendered: string, consume: (staging: string) => Promise<Result>): Promise<Result> {
+export async function withAgentConfigSpool<Result>(rendered: string, owner: { uid: number; gid: number }, consume: (staging: string) => Promise<Result>): Promise<Result> {
+  if (!Number.isSafeInteger(owner.uid) || owner.uid < 0 || !Number.isSafeInteger(owner.gid) || owner.gid < 0) {
+    throw new Error('Invalid config spool identity');
+  }
   const directory = await mkdtemp(path.join(tmpdir(), 'opencode-config-'));
   try {
     const staging = path.join(directory, 'opencode.json');
-    await writeFile(staging, rendered, { encoding: 'utf8', mode: 0o644 });
-    await chmod(staging, 0o644);
-    await chmod(directory, 0o755);
+    await writeFile(staging, rendered, { encoding: 'utf8', mode: 0o600 });
+    await chmod(staging, 0o600);
+    const initial = await stat(staging);
+    if (initial.uid !== owner.uid || initial.gid !== owner.gid) {
+      await exec('sudo', ['chown', `${owner.uid}:${owner.gid}`, staging], { env: { PATH: MINIMAL_PATH } });
+    }
+    const transferred = await stat(staging);
+    if (transferred.uid !== owner.uid || transferred.gid !== owner.gid || (transferred.mode & 0o777) !== 0o600) {
+      throw new Error('Config spool ownership transfer refused');
+    }
+    await chmod(directory, 0o711);
     return await consume(staging);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -127,8 +138,8 @@ export async function withAgentConfigSpool<Result>(rendered: string, consume: (s
  *   - `~/.config/opencode` принадлежит UID рана, поэтому пишет **раннер** в свой
  *     каталог, а переносит под идентичность (`cp` даёт EPERM на чужой файл, а
  *     `mkdir`/`chmod` оттуда — EACCES/EPERM);
- *   - staging-файл нужен читаемым (`0644`): его читает идентичность, а пишет раннер;
- *     секрета в нём нет — `apiKey` это ссылка `{env:ИМЯ}`;
+ *   - staging-файл (`0600`) принадлежит UID рана; каталог (`0711`) не раскрывает
+ *     содержимое другим UID, даже если MCP-заголовки содержат literal credentials;
  *   - `cp` не создаёт промежуточные каталоги, а `~/.config/opencode` у
  *     свежесозданного пользователя отсутствует;
  *   - `chmod 600` — тоже под идентичностью: после `cp` файл принадлежит UID рана.
@@ -145,7 +156,7 @@ export async function installAgentConfigUnderIdentity(options: {
     { llmKeyEnvName: options.llmKeyEnvName, mcpServers: options.mcpServers },
   );
   const target = path.join(identity.home, '.config', 'opencode', 'opencode.json');
-  return withAgentConfigSpool(rendered, async (staging) => {
+  return withAgentConfigSpool(rendered, identity, async (staging) => {
     await exec('sudo', ['-u', identity.name, '--', 'mkdir', '-p', path.dirname(target)], { env });
     await exec('sudo', ['-u', identity.name, '--', 'cp', staging, target], { env });
     await exec('sudo', ['-u', identity.name, '--', 'chmod', '600', target], { env });

@@ -210,7 +210,7 @@ export function buildChildPath(allowlisted: string | undefined, binaryDir: strin
     .split(':')
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
-  const dirs = base.includes(binaryDir) ? base : [binaryDir, ...base];
+  const dirs = !path.isAbsolute(binaryDir) || base.includes(binaryDir) ? base : [binaryDir, ...base];
   return dirs.join(':');
 }
 

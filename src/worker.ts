@@ -15,6 +15,10 @@ export interface Env {
   GITHUB_REF?: string;
   PUBLIC_BASE_URL: string;
   AGENT_BINARY?: string;
+  /** Источник кольца: `https://llm-ladder.trainedassist.store`. */
+  ZEN_RING_URL?: string;
+  /** Админ-токен кольца — только им читается `/zen/ring/payload`. */
+  ZEN_RING_ADMIN_TOKEN?: string;
 }
 
 export default {
@@ -30,8 +34,13 @@ export default {
         publicBaseUrl: env.PUBLIC_BASE_URL.replace(/\/+$/, ''),
         agentBinary: env.AGENT_BINARY ?? 'opencode',
         githubToken: env.GITHUB_TOKEN,
+        zenRingUrl: env.ZEN_RING_URL,
+        zenRingAdminToken: env.ZEN_RING_ADMIN_TOKEN,
       },
       store: new KvRunStore(env.RUNS),
+      // Тот же KV держит курсор round-robin и кэш кольца: запросы попадают в разные
+      // изоляты, и счётчик в памяти возвращал бы к первому репозиторию на каждом.
+      kv: env.RUNS,
       // Тело `launch` содержит `llmKey`, поэтому в лог уходят только идентификаторы.
       log: (message, fields) => console.log(JSON.stringify({ level: 'info', message, ...fields })),
     });

@@ -27,7 +27,8 @@ import {
   type LaunchResult,
 } from '../contracts.js';
 import { DispatchError, GitHubClient, type GitHubClientOptions } from './github.js';
-import { isTerminal, workerStatus, type RunStore, type StoredRun } from './store.js';
+import { Ring, type RingTarget } from './ring.js';
+import { isTerminal, workerStatus, type KvLike, type RunStore, type StoredRun } from './store.js';
 
 export interface GatewayConfig {
   /** Общий секрет между нашим API и воркером (`Authorization: Bearer`). */
@@ -41,14 +42,30 @@ export interface GatewayConfig {
   publicBaseUrl: string;
   /** Бинарь агента, который джоба должна запустить. */
   agentBinary: string;
-  /** Токен GitHub для диспатча и отмены. */
+  /**
+   * Запасная цель, если кольцо пусто: репозиторий и токен для диспатча.
+   * Кольцо, когда оно есть, перекрывает её — оно и есть список мест запуска.
+   */
   githubToken: string;
+  /** Статический список целей кольца (repo+token). Пустой — кольцо берётся у zen-rings. */
+  ringTargets?: RingTarget[];
+  /** `https://llm-ladder.trainedassist.store` — источник кольца. */
+  zenRingUrl?: string;
+  /** Админ-токен кольца: только им читается `/zen/ring/payload`. */
+  zenRingAdminToken?: string;
 }
 
 export interface GatewayDeps {
   config: GatewayConfig;
   store: RunStore;
+  /** Один клиент на все цели — для тестов, которым важно только поведение. */
   github?: GitHubClient;
+  /** Клиент под конкретную цель кольца — чтобы тест видел, куда ушёл ран. */
+  githubFor?: (target: RingTarget) => GitHubClient;
+  /** Кольцо; если не передано, собирается из конфига. */
+  ring?: Ring;
+  /** Общее хранилище для курсора round-robin и кэша кольца. */
+  kv?: KvLike;
   fetchImpl?: typeof fetch;
   /** Генератор токенов — подменяется в тестах на детерминированный. */
   randomToken?: () => string;
@@ -101,15 +118,49 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
   const randomToken = deps.randomToken ?? defaultRandomToken;
   const now = deps.now ?? (() => Date.now());
   const log = deps.log ?? ((): void => {});
-  const github =
-    deps.github ??
-    new GitHubClient({
-      token: config.githubToken,
-      repo: config.repo,
-      workflow: config.workflow,
-      ref: config.ref,
+  // Клиент строится под цель: у каждого репозитория кольца свой токен и своя история
+  // прогонов. Кэш по ключу «репозиторий+токен» — чтобы не пересобирать на каждый запрос.
+  const clientCache = new Map<string, GitHubClient>();
+  const clientFor = (target: RingTarget): GitHubClient => {
+    if (deps.githubFor) return deps.githubFor(target);
+    if (deps.github) return deps.github;
+    const key = `${target.repo}\n${target.token}`;
+    let client = clientCache.get(key);
+    if (!client) {
+      client = new GitHubClient({
+        token: target.token,
+        repo: target.repo,
+        workflow: config.workflow,
+        ref: config.ref,
+        fetchImpl: deps.fetchImpl,
+      } satisfies GitHubClientOptions);
+      clientCache.set(key, client);
+    }
+    return client;
+  };
+
+  const ring =
+    deps.ring ??
+    new Ring({
+      targets: config.ringTargets,
+      zenUrl: config.zenRingUrl,
+      zenAdminToken: config.zenRingAdminToken,
+      kv: deps.kv,
       fetchImpl: deps.fetchImpl,
-    } satisfies GitHubClientOptions);
+      log,
+    });
+  /** Куда идти, если кольцо пусто или недоступно. */
+  const fallbackTarget: RingTarget = { repo: config.repo, token: config.githubToken };
+
+  /** Следующая цель кольца; падение кольца не должно ронять запуск. */
+  async function pickTarget(): Promise<RingTarget> {
+    try {
+      return (await ring.next()) ?? fallbackTarget;
+    } catch (cause) {
+      log('ring pick failed', { error: cause instanceof Error ? cause.message : String(cause) });
+      return fallbackTarget;
+    }
+  }
 
   if (!isSafeWorkflowName(config.workflow)) {
     throw new Error(`config.workflow must look like "run-agent.yml", got "${config.workflow}"`);
@@ -146,6 +197,11 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
       return json(receipt(existing), 202, noStore());
     }
 
+    // Цель кольца выбирается до записи рана: она часть записи, потому что отмена и
+    // поиск осиротевшего прогона обязаны идти именно в этот репозиторий.
+    const target = await pickTarget();
+    const github = clientFor(target);
+
     const claimToken = randomToken();
     const reportToken = randomToken();
     await store.create({
@@ -156,12 +212,18 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
       createdAt: now(),
       updatedAt: now(),
       githubRunId: null,
+      target,
       claimToken,
       reportToken,
       result: null,
     });
 
-    log('dispatching run', { runId: spec.runId, operationId: spec.operationId, engine: spec.engine.name });
+    log('dispatching run', {
+      runId: spec.runId,
+      operationId: spec.operationId,
+      engine: spec.engine.name,
+      repo: target.repo,
+    });
 
     // Момент до диспатча: по нему ищем прогон, если ответ потеряется.
     const dispatchStartedAt = now();
@@ -347,7 +409,9 @@ async function handleCancel(runId: string): Promise<Response> {
       return json({ status: 'cancelled', reason: 'cancelled_before_dispatch' }, 200, noStore());
     }
 
-    const outcome = await github.cancelWorkflowRun(run.githubRunId);
+    // Клиент — под цель рана, а не под текущую: round-robin к этому моменту мог
+    // выбрать другой репозиторий, и отмена ушла бы не туда.
+    const outcome = await clientFor(run.target).cancelWorkflowRun(run.githubRunId);
     if (outcome.cancelled) {
       await store.complete(runId, run.reportToken, cancelledResult(run));
       return json({ status: 'cancelled' }, 200, noStore());

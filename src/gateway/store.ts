@@ -13,6 +13,7 @@
  */
 
 import type { LaunchRequest, LaunchResult, RunPhase, WorkerRunStatus } from '../contracts.js';
+import type { RingTarget } from './ring.js';
 
 export interface StoredRun {
   runId: string;
@@ -28,6 +29,15 @@ export interface StoredRun {
   updatedAt: number;
   /** id прогона в GitHub Actions — по нему живут cancel и разбор логов. */
   githubRunId: number | null;
+  /**
+   * Куда ушёл ран: репозиторий кольца и его токен.
+   *
+   * Хранится, потому что отмена и поиск осиротевшего прогона обязаны идти в тот же
+   * репозиторий и тем же токеном, а не в «текущую» цель кольца: к моменту отмены
+   * round-robin уже мог выбрать другую. Токен вычищается вместе с ключом LLM, когда
+   * ран завершён.
+   */
+  target: RingTarget;
   /**
    * Одноразовый токен, который единственный раз едет в `workflow_dispatch`.
    * Он не даёт доступа ни к ключу LLM, ни к промпту: им обмениваются на
@@ -132,7 +142,9 @@ export class MemoryRunStore implements RunStore {
     run.phase = 'done';
     run.updatedAt = Date.now();
     // Ключ LLM больше не нужен: джоба получила его на claim, результат она уже послала.
+    // Токен цели — тоже: отменять и искать уже нечего.
     run.request = { ...run.request, env: {}, credentials: undefined };
+    run.target = { repo: run.target.repo, token: '' };
     return true;
   }
 
@@ -211,6 +223,7 @@ export class KvRunStore implements RunStore {
     run.phase = 'done';
     run.updatedAt = Date.now();
     run.request = { ...run.request, env: {}, credentials: undefined };
+    run.target = { repo: run.target.repo, token: '' };
     await this.kv.put(runKey(runId), JSON.stringify(run), { expirationTtl: this.ttlSeconds });
     return true;
   }

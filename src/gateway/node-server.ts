@@ -8,6 +8,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createGateway, type GatewayConfig, type GatewayDeps } from './app.js';
+import { parseRing } from './ring.js';
 import { MemoryRunStore, type RunStore } from './store.js';
 
 export interface NodeServerOptions extends GatewayDeps {
@@ -133,6 +134,10 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): GatewayConf
     publicBaseUrl: (env['PUBLIC_BASE_URL'] ?? `http://127.0.0.1:${Number.isFinite(port) ? port : 8787}`).replace(/\/+$/, ''),
     agentBinary: env['AGENT_BINARY'] ?? 'opencode',
     githubToken: required('GITHUB_TOKEN'),
+    // Кольцо необязательно: без него всё уходит в GITHUB_REPO, как раньше.
+    ...(env['RING_TARGETS'] ? { ringTargets: parseRing(env['RING_TARGETS']) } : {}),
+    ...(env['ZEN_RING_URL'] ? { zenRingUrl: env['ZEN_RING_URL'] } : {}),
+    ...(env['ZEN_RING_ADMIN_TOKEN'] ? { zenRingAdminToken: env['ZEN_RING_ADMIN_TOKEN'] } : {}),
   };
 }
 

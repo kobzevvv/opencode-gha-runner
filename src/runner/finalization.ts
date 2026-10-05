@@ -22,3 +22,7 @@ export function buildAgentPrompt(prompt: string, outputs: readonly OutputSpec[] 
   if (!outputs?.length) return prompt;
   return `${prompt}\n\nHost output requirements:\nCreate every declared output as a regular file relative to the current working directory: ${JSON.stringify(outputs.map((output) => output.path))}. Execute the task, not just a plan. Write the final user-facing answer to .agent/answer.txt. Declared outputs must exist for the run to succeed.`;
 }
+
+export function buildAgentArgs(extraArgs: readonly string[], prompt: string, outputs: readonly OutputSpec[] | undefined, outputFormat?: string): string[] {
+  return [...extraArgs, 'run', ...(outputFormat === 'json' ? ['--format', 'json'] : []), buildAgentPrompt(prompt, outputs)];
+}

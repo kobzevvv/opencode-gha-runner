@@ -5,9 +5,13 @@ import type { AnswerSource } from '../contracts.js';
 export type AgentOutputFormat = 'json' | 'plain';
 
 export function agentOutputFormat(args: readonly string[]): AgentOutputFormat {
-  const formatIndex = args.lastIndexOf('--format');
-  const assigned = [...args].reverse().find((argument) => argument.startsWith('--format='));
-  return (assigned?.slice('--format='.length) ?? (formatIndex >= 0 ? args[formatIndex + 1] : 'default')) === 'json' ? 'json' : 'plain';
+  let format = 'default';
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]!;
+    if (argument === '--format') format = args[++index] ?? 'default';
+    else if (argument.startsWith('--format=')) format = argument.slice('--format='.length);
+  }
+  return format === 'json' ? 'json' : 'plain';
 }
 
 export function extractAssistantText(stdout: string): string | undefined {

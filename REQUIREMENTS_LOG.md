@@ -9,3 +9,4 @@ Source: architecture issue [#140](https://github.com/trained-assist/trained-agen
 - GitHub refusal diagnostics contain only operation and HTTP status, never response bodies or credential values.
 - Live acceptance source must use its own CF gateway and KV, dispatch the integration branch, and claim only from that gateway. Shared workflow variables and Action secrets remain unchanged; provisioning/deployment belongs to parent.
 - Artifact publication uses the captured in-workspace bytes used for SHA-256 and size, never reopens agent-controlled output paths after collection; replacement, deletion or symlink swaps cannot change the publication snapshot.
+- Only the owned integration workflow branch sets host-only `AGENT_OUTPUT_FORMAT=json`. Append its format flag after the OpenCode `run` subcommand; preserve model, prompt and shared defaults, and derive answer parsing from actual launch flags, not client input.

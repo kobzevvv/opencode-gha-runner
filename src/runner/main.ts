@@ -42,7 +42,7 @@ import { createRunIdentity, destroyRunIdentity, isBinaryAvailable, runUnderIdent
 import { installAgentConfigUnderIdentity } from './agent-config.js';
 import { uploadSessionLog, type LogUploadMode } from './logs.js';
 import { agentOutputFormat, extractAnswer } from './answer.js';
-import { buildAgentPrompt, declaredOutputFailure } from './finalization.js';
+import { buildAgentArgs, declaredOutputFailure } from './finalization.js';
 
 const exec = promisify(execFile);
 
@@ -59,6 +59,7 @@ export interface RunnerEnv {
   WORKSPACE_ROOT?: string;
   /** Дополнительные флаги агенту (модель и т.п.), через пробел. */
   AGENT_ARGS?: string;
+  AGENT_OUTPUT_FORMAT?: string;
   /** `false` — запретить sudo, чтобы прогнать приёмку без создания пользователей. */
   ALLOW_SUDO?: string;
   /** `skip` — не ставить конфиг провайдера (агент уже сконфигурирован в репозитории). */
@@ -492,9 +493,9 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       injectedSecrets: mcpSecrets,
     });
     const extraArgs = (env.AGENT_ARGS ?? '').split(' ').filter(Boolean);
-    const agentArgs = [...extraArgs, 'run', buildAgentPrompt(spec.input.inlinePrompt, spec.outputs)];
+    const agentArgs = buildAgentArgs(extraArgs, spec.input.inlinePrompt, spec.outputs, env.AGENT_OUTPUT_FORMAT);
     // Промпт в лог не пишем: он может содержать секреты, а лог уезжает в GCS.
-    sessionLog.append('stdout', `\n$ ${claim.agentBinary} ${extraArgs.join(' ')} run <prompt>\n`);
+    sessionLog.append('stdout', `\n$ ${claim.agentBinary} ${agentArgs.slice(0, -1).join(' ')} <prompt>\n`);
 
     const outcome = await runAgent({
       identity,
@@ -543,7 +544,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     }
 
     // ── 7. ответ нашему API ────────────────────────────────────────────────────
-    const answer = extractAnswer(workspace, outcome.stdout, agentOutputFormat(extraArgs));
+    const answer = extractAnswer(workspace, outcome.stdout, agentOutputFormat(agentArgs.slice(0, -1)));
     const engineFailure = failureForOutcome(outcome.exitReason, collected.missing);
     const result = buildLaunchResult({
       runId,

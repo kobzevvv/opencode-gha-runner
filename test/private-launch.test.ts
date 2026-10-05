@@ -3,7 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { runAgent } from '../src/runner/exec.js';
-import { buildLaunchCommand, runUnderIdentity, type Identity } from '../src/runner/identity.js';
+import { buildChildPath, buildLaunchCommand, MINIMAL_PATH, runUnderIdentity, type Identity } from '../src/runner/identity.js';
 
 const identity: Identity = { name: 'ocrun-offline', uid: 1234, gid: 1234,
   home: '/tmp/offline-home', workspace: process.cwd(), enforced: false };
@@ -56,6 +56,15 @@ test('private helper refuses invalid payload without echoing credentials', () =>
 test('private launcher bounds payload before spawn', () => {
   assert.throws(() => buildLaunchCommand({ identity, binary: process.execPath, argv: [],
     env: { LARGE: 'x'.repeat(1048576) } }), /payload exceeds limit/);
+});
+
+test('bare host commands do not prepend the workspace to credential-bearing PATH', () => {
+  const launch = buildLaunchCommand({ identity, binary: 'git', argv: ['clone'],
+    env: { GIT_CONFIG_VALUE_0: secret } });
+  assert.equal(JSON.parse(launch.stdin).env.PATH, MINIMAL_PATH);
+  assert.equal(buildChildPath('/usr/bin:/bin', '.'), '/usr/bin:/bin');
+  assert.equal(buildChildPath('/usr/bin:/bin', 'relative/bin'), '/usr/bin:/bin');
+  assert.equal(buildChildPath('/usr/bin:/bin', '/opt/trusted-release/bin'), '/opt/trusted-release/bin:/usr/bin:/bin');
 });
 
 test('private helper preserves signal termination', async () => {

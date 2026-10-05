@@ -39,7 +39,9 @@ if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
 else
   # OAuth-токен wrangler лежит вне репозитория и протухает. Проверяем его фактом,
   # а не наличием файла: expired-токен проходит проверку файла и падает на деплое.
-  if npx --yes wrangler@3 --version >/dev/null 2>&1 && (cd "$WORKER_DIR" && npx wrangler whoami >/dev/null 2>&1); then
+  # `npx wrangler`, а не `npx wrangler@3`: второе скачивает отдельную копию и тратит
+  # минуты на ровном месте.
+  if (cd "$WORKER_DIR" && npx wrangler whoami >/dev/null 2>&1); then
     info "OAuth-токен wrangler действителен"
   else
     cat >&2 <<'MSG'
@@ -137,14 +139,29 @@ if [ -z "$PUBLIC_URL" ]; then
   fi
 fi
 if [ -z "$PUBLIC_URL" ]; then
-  info "поднимаю cloudflared"
+  info "поднимаю cloudflared (quick tunnel)"
+  rm -f "$STATE/tunnel.log"
   (cd "$STATE" && nohup cloudflared tunnel --url "http://127.0.0.1:$API_PORT" --no-autoupdate > tunnel.log 2>&1 &)
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 45); do
     PUBLIC_URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$STATE/tunnel.log" 2>/dev/null | head -1)"
     [ -n "$PUBLIC_URL" ] && break
+    # Туннель может упасть сразу после старта — тогда ждать бессмысленно.
+    pgrep -f "cloudflared tunnel --url http://127.0.0.1:$API_PORT" >/dev/null 2>&1 || break
     sleep 2
   done
-  [ -n "$PUBLIC_URL" ] || die "туннель не поднялся, смотри $STATE/tunnel.log"
+  if [ -z "$PUBLIC_URL" ]; then
+    tail -3 "$STATE/tunnel.log" >&2 || true
+    cat >&2 <<'MSG'
+
+  quick tunnel не поднялся (журнал выше). Два пути:
+    - повторить: серверы Cloudflare бывают заняты;
+    - задать PUBLIC_URL от туннеля, который уже работает:
+        PUBLIC_URL=https://<тот-домен>.trycloudflare.com ./scripts/deploy-and-accept.sh
+      Тогда скрипт поднимет API и не будет трогать туннель.
+
+MSG
+    exit 1
+  fi
   printf '%s' "$PUBLIC_URL" > "$STATE/tunnel-url"
   info "туннель: $PUBLIC_URL"
 fi
@@ -152,7 +169,9 @@ fi
 # Ключ LLM: берём с VM, где лежит реальный ключ кольца. В репозиторий он не попадает.
 LLM_KEY="${LLM_KEY:-}"
 if [ -z "$LLM_KEY" ]; then
-  LLM_KEY="$(ssh -o ConnectTimeout=10 "$LLM_KEY_HOST" \
+  # BatchMode — без него ssh может молча ждать подтверждения хоста или пароля sudo,
+  # и скрипт вместо отказа висит.
+  LLM_KEY="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$LLM_KEY_HOST" \
     "sudo grep -o 'LLM_LADDER_TOKEN\\\\\":\\\\\"[a-z0-9]*' /etc/agent-runner/integrator-v1-combined.env | head -1 | sed 's/.*\\\\\":\\\\\"//'" 2>/dev/null || true)"
 fi
 [ -n "$LLM_KEY" ] || die "не нашёл ключ LLM. Задай LLM_KEY=… вручную (нужен ключ кольца с доступом к ladder/free)"

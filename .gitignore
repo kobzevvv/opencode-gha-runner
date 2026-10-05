@@ -6,3 +6,5 @@ dist/
 .env
 .env.*
 .DS_Store
+.accept/
+# состояние скрипта deploy-and-accept.sh: ключи и api.env с секретами

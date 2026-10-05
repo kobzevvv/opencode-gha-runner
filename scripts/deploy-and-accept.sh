@@ -18,7 +18,10 @@ set -Eeuo pipefail
 
 WORKER_DIR="${WORKER_DIR:-$HOME/Code/opencode-gha-runner-work}"
 API_DIR="${API_DIR:-$HOME/Code/ai-agent-runner-work}"
-STATE="${STATE:-$WORKER_DIR/.accept}"
+# Состояние живёт ВНЕ репозитория: иначе файлы с секретами (api.env, api-key) оказываются
+# в рабочем дереве, а проверка «деплой только из чистого дерева» бьёт по собственным
+# файлам скрипта. Каталог служебный и переживает перезапуск машины.
+STATE="${STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-gha-runner/accept}"
 RUNS="${RUNS:-3}"
 API_PORT="${API_PORT:-8791}"
 REPO="${REPO:-vovalikessmoothy-png/opencode-gha-runner}"

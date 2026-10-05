@@ -24,4 +24,7 @@ test('branch workflow claim URL equals its owned config endpoint and checkout pi
   assert.ok(workflow.includes('ref: ${{ github.sha }}'));
   assert.ok(workflow.includes(`AGENT_OUTPUT_FORMAT: \${{ github.ref_name == '${branch}' && 'json' || '' }}`));
   assert.ok(workflow.includes('AGENT_ARGS: ${{ vars.AGENT_ARGS }}'));
+  assert.ok(workflow.includes(`REQUIRE_CLAIM_AUTH: \${{ github.ref_name == '${branch}' && 'true' || '' }}`));
+  assert.ok(workflow.includes(`CLAIM_AUTH_TOKEN: \${{ github.ref_name == '${branch}' && secrets.INTEGRATOR_V1_CLAIM_AUTH_TOKEN || '' }}`));
+  assert.ok(sandbox.includes('REQUIRE_CLAIM_AUTH = "true"'));
 });

@@ -24,7 +24,7 @@ import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { REPORT_PATH, type ClaimPayload } from '../claim.js';
+import { claimRequestHeaders, REPORT_PATH, type ClaimPayload } from '../claim.js';
 import {
   clampTimeout,
   failure,
@@ -49,6 +49,8 @@ const exec = promisify(execFile);
 export interface RunnerEnv {
   GATEWAY_URL: string;
   CLAIM_TOKEN: string;
+  REQUIRE_CLAIM_AUTH?: string;
+  CLAIM_AUTH_TOKEN?: string;
   RUN_ID: string;
   /** Токен для клона `repository.fullName` и пуша артефактов. `GITHUB_TOKEN` джобы не годится. */
   ARTIFACTS_TOKEN?: string;
@@ -390,6 +392,11 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     logLine('missing GATEWAY_URL / RUN_ID / CLAIM_TOKEN — nothing to claim');
     return RUNNER_EXIT.badEnv;
   }
+  const claimAuthToken = env.CLAIM_AUTH_TOKEN?.trim();
+  if (env.REQUIRE_CLAIM_AUTH === 'true' && !claimAuthToken) {
+    logLine('required claim authentication is unconfigured');
+    return RUNNER_EXIT.badEnv;
+  }
 
   const sessionLog = new SessionLog();
   let claim: ClaimPayload | null = null;
@@ -399,11 +406,11 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     // ── 1. claim ──────────────────────────────────────────────────────────────
     const claimResponse = await fetch(`${gatewayUrl}/v1/claim`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${claimToken}`, 'content-type': 'application/json' },
+      headers: claimRequestHeaders(claimToken, claimAuthToken),
       body: JSON.stringify({ runId }),
     });
     if (!claimResponse.ok) {
-      const text = redact(await claimResponse.text(), claimToken).slice(0, 300);
+      const text = redact(await claimResponse.text(), claimToken, claimAuthToken).slice(0, 300);
       logLine(`claim failed (${claimResponse.status}): ${text}`);
       // Отчитаться нечем: report-токен выдаётся только после успешного claim'а.
       // Наш API увидит `dispatched` без результата и разберётся по таймауту опроса.
@@ -415,7 +422,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     // Локальная копия: в замыкании narrowing по `claim` не работает.
     const reportToken = claim.reportToken;
     const mcpSecrets = spec.mcpSecrets ?? {};
-    const secrets = [claim.llmKey, env.ARTIFACTS_TOKEN, ...Object.values(mcpSecrets)];
+    const secrets = [claim.llmKey, env.ARTIFACTS_TOKEN, claimAuthToken, ...Object.values(mcpSecrets)];
 
     logLine(`claimed job=${spec.jobId} timeout=${spec.limits.timeoutMs}ms outputs=${spec.outputs?.length ?? 0}`);
 
@@ -562,7 +569,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     await report(reportUrl, claim.reportToken, result);
     return result.exitReason === 'completed' ? RUNNER_EXIT.ok : RUNNER_EXIT.agentFailed;
   } catch (cause) {
-    const safeSummary = redact(cause instanceof Error ? cause.message : String(cause), claim?.llmKey);
+    const safeSummary = redact(cause instanceof Error ? cause.message : String(cause), claim?.llmKey, claimToken, claimAuthToken);
     logLine(`runner crashed: ${safeSummary}`);
     if (claim) {
       await report(

@@ -125,6 +125,8 @@ GCP Secret Manager. В репозиторий он не попадает: шлю
 
 Parent provisioner должен создать отдельный KV и заменить `REPLACE_WITH_OWN_KV_NAMESPACE_ID`, проверить соответствие `PUBLIC_BASE_URL` branch-workflow endpoint и отдельно provision Worker secrets `WORKER_TOKEN` / `GITHUB_TOKEN`. Затем `npm run build` и deployment с `-c wrangler.integration-v1.toml`. Не использовать KV/Worker token shared gateway, не менять repository workflow variables или `ARTIFACTS_TOKEN`. Патч не создаёт ресурсы, не деплоит Worker и не запускает задачи.
 
+В owned Worker включён `REQUIRE_CLAIM_AUTH=true`. Parent provisioner создаёт новый Worker secret `CLAIM_AUTH_TOKEN` и новый repository Actions secret `INTEGRATOR_V1_CLAIM_AUTH_TOKEN` с одинаковым значением. Только integration-ветка получает его как host-only env. `POST /v1/claim` сохраняет `Authorization: Bearer <claim_token>` и body `{runId}`, добавляя `X-Claim-Host-Auth: Bearer <CLAIM_AUTH_TOKEN>`. Host guard проверяется до чтения body и обращения к claim store: отсутствующий configured secret даёт 503, отсутствующий/неверный host header — 401. Без `REQUIRE_CLAIM_AUTH=true` прежний протокол не меняется. Новый секрет не передаётся в claim payload, model env, prompt или argv. Public claim token сам по себе больше не открывает owned claim endpoint; это не OIDC-проверка и не исправление атомарности KV claim.
+
 ### Final answer и обязательные выходы
 
 Связанные баги: [worker #1](https://github.com/vovalikessmoothy-png/opencode-gha-runner/issues/1), [integrator #140](https://github.com/trained-assist/trained-agent-architecture/issues/140).

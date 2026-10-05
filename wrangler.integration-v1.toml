@@ -13,6 +13,7 @@ GITHUB_WORKFLOW = "run-agent.yml"
 GITHUB_REF = "integration/final-answer-v1-20261005"
 PUBLIC_BASE_URL = "https://trained-assist-native-worker-v1-sandbox.skillset-apply.workers.dev"
 AGENT_BINARY = "opencode"
+REQUIRE_CLAIM_AUTH = "true"
 
 [observability]
 enabled = false

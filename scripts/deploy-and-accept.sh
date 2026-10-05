@@ -44,7 +44,7 @@ else
   # а не наличием файла: expired-токен проходит проверку файла и падает на деплое.
   # `npx wrangler`, а не `npx wrangler@3`: второе скачивает отдельную копию и тратит
   # минуты на ровном месте.
-  if (cd "$WORKER_DIR" && npx wrangler whoami >/dev/null 2>&1); then
+  if (cd "$WORKER_DIR" && npx wrangler whoami </dev/null >/dev/null 2>&1); then
     info "OAuth-токен wrangler действителен"
   else
     cat >&2 <<'MSG'
@@ -99,7 +99,7 @@ if [ "${AUTH_ONLY:-0}" = "1" ]; then
   step "4/6 AUTH_ONLY=1 — деплой пропущен"
 else
   step "4/6 Деплой шлюза"
-  npx wrangler deploy 2>&1 | tail -5
+  npx wrangler deploy </dev/null 2>&1 | tail -5
   info "проверяю, что шлюз жив"
   for _ in $(seq 1 10); do
     if curl -sS -m 10 "$GATEWAY/healthz" | grep -qE '"ok":[[:space:]]*true'; then break; fi
@@ -144,7 +144,7 @@ fi
 if [ -z "$PUBLIC_URL" ]; then
   info "поднимаю cloudflared (quick tunnel)"
   rm -f "$STATE/tunnel.log"
-  (cd "$STATE" && nohup cloudflared tunnel --url "http://127.0.0.1:$API_PORT" --no-autoupdate > tunnel.log 2>&1 &)
+  (cd "$STATE" && nohup cloudflared tunnel --url "http://127.0.0.1:$API_PORT" --no-autoupdate </dev/null > tunnel.log 2>&1 &)
   for _ in $(seq 1 45); do
     PUBLIC_URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$STATE/tunnel.log" 2>/dev/null | head -1)"
     [ -n "$PUBLIC_URL" ] && break
@@ -211,7 +211,7 @@ if curl -sS -m 5 -o /dev/null "http://127.0.0.1:$API_PORT/healthz" 2>/dev/null; 
   sleep 2
 fi
 set -a; . "$STATE/api.env"; set +a
-(cd "$API_DIR" && nohup node dist/api/main.js > "$STATE/api.log" 2>&1 &)
+(cd "$API_DIR" && nohup node dist/api/main.js </dev/null > "$STATE/api.log" 2>&1 &)
 for _ in $(seq 1 20); do
   curl -sS -m 5 -o /dev/null "http://127.0.0.1:$API_PORT/healthz" 2>/dev/null && break
   sleep 2

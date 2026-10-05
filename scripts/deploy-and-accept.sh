@@ -102,11 +102,11 @@ else
   npx wrangler deploy 2>&1 | tail -5
   info "проверяю, что шлюз жив"
   for _ in $(seq 1 10); do
-    if curl -sS -m 10 "$GATEWAY/healthz" | grep -q '"ok":true'; then break; fi
+    if curl -sS -m 10 "$GATEWAY/healthz" | grep -qE '"ok":[[:space:]]*true'; then break; fi
     sleep 3
   done
   curl -sS -m 10 "$GATEWAY/healthz" | head -c 200; echo
-  curl -sS -m 10 "$GATEWAY/healthz" | grep -q '"ok":true' || die "шлюз не отвечает после деплоя"
+  curl -sS -m 10 "$GATEWAY/healthz" | grep -qE '"ok":[[:space:]]*true' || die "шлюз не отвечает после деплоя"
 fi
 
 # ── 5. поднять наше API ───────────────────────────────────────────────────────

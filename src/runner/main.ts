@@ -465,6 +465,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
   const sessionLog = new SessionLog();
   let claim: ClaimPayload | null = null;
   let identity: Identity | null = null;
+  let agentAttempted = false;
 
   try {
     // ── 1. claim ──────────────────────────────────────────────────────────────
@@ -575,6 +576,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     // Промпт в лог не пишем: он может содержать секреты, а лог уезжает в GCS.
     sessionLog.append('stdout', `\n$ ${claim.agentBinary} ${extraArgs.join(' ')} run <prompt>\n`);
 
+    agentAttempted = true;
     const outcome = await runAgent({
       identity,
       binary: claim.agentBinary,
@@ -657,6 +659,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
         `${gatewayUrl}${REPORT_PATH(runId)}`,
         claim.reportToken,
         emptyResult(runId, claim.spec.repository, {
+          ...(agentAttempted && claim.spec.profileWorkspace ? { status: 'started' } : {}),
           failure: failure('WORKER_INTERNAL', 'finalization', safeSummary),
           stderr: safeSummary,
         }),

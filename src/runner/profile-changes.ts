@@ -23,6 +23,15 @@ function mimeFor(relative: string): string {
   return ({ '.md': 'text/markdown', '.txt': 'text/plain', '.json': 'application/json', '.csv': 'text/csv', '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg' } as Record<string, string>)[ext] ?? 'application/octet-stream';
 }
 
+async function statIfPresent(file: string) {
+  try {
+    return await lstat(file);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw cause;
+  }
+}
+
 /** Changed tracked files, deletions and new untracked files after the agent exits. */
 export async function collectProfileChanges(spec: LaunchRequest, workspace: string, identity: Identity): Promise<ProfileChangeSet> {
   if (!spec.profileWorkspace) return { artifacts: [], deletes: [] };
@@ -35,7 +44,7 @@ export async function collectProfileChanges(spec: LaunchRequest, workspace: stri
   const untracked = await runUnderIdentity(identity, 'git', ['-C', workspace, 'ls-files', '--others', '-z'], gitEnv);
   const paths = new Set(`${modified.stdout}\0${untracked.stdout}`.split('\0').filter(Boolean));
   for (const artifact of spec.profileWorkspace.artifacts) {
-    if (!(await lstat(path.resolve(workspace, artifact.path)).catch(() => null))) paths.add(artifact.path);
+    if (!(await statIfPresent(path.resolve(workspace, artifact.path)))) paths.add(artifact.path);
   }
   const root = await realpath(workspace);
   const inputArtifacts = new Map(spec.profileWorkspace.artifacts.map((entry) => [entry.path, entry]));
@@ -45,7 +54,7 @@ export async function collectProfileChanges(spec: LaunchRequest, workspace: stri
   for (const relative of [...paths].sort()) {
     if (!isSafeRelativePath(relative) || excluded(relative, rules)) continue;
     const absolute = path.resolve(workspace, relative);
-    const stat = await lstat(absolute).catch(() => null);
+    const stat = await statIfPresent(absolute);
     if (!stat) { deletes.push(relative); continue; }
     if (stat.isSymbolicLink()) throw new Error(`profile change is a symlink: ${relative}`);
     if (!stat.isFile()) { deletes.push(relative); continue; }

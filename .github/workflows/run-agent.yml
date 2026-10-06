@@ -27,6 +27,7 @@ concurrency:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   run:
@@ -34,6 +35,9 @@ jobs:
     # вместе с клоном, установкой opencode и пушем артефактов. +10 минут на них.
     timeout-minutes: 60
     runs-on: ubuntu-latest
+    env:
+      GCS_WORKLOAD_PROVIDER: ${{ vars.GCS_WORKLOAD_PROVIDER }}
+      GCS_SERVICE_ACCOUNT: ${{ vars.GCS_SERVICE_ACCOUNT }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -55,6 +59,12 @@ jobs:
           workload_identity_provider: ${{ env.GCS_WORKLOAD_PROVIDER }}
           service_account: ${{ env.GCS_SERVICE_ACCOUNT }}
 
+      - name: Set up Cloud SDK
+        if: env.GCS_WORKLOAD_PROVIDER != ''
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          version: '>= 363.0.0'
+
       # Бинарь ставится до создания идентичности и делается world-readable, чтобы
       # агент мог его исполнить под своим UID, но не мог переписать.
       - name: Install opencode
@@ -72,6 +82,7 @@ jobs:
           ARTIFACTS_TOKEN: ${{ secrets.ARTIFACTS_TOKEN }}
           LOG_UPLOAD: ${{ vars.LOG_UPLOAD || 'gcs' }}
           GCS_LOG_BUCKET: ${{ vars.GCS_LOG_BUCKET }}
+          GCS_PROFILE_BUCKET: ${{ vars.GCS_PROFILE_BUCKET }}
           WORKSPACE_ROOT: ${{ runner.temp }}
           AGENT_ARGS: ${{ vars.AGENT_ARGS }}
           AGENT_CONFIG: ${{ vars.AGENT_CONFIG }}

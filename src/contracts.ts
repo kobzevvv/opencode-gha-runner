@@ -103,7 +103,13 @@ export interface LaunchRequest {
    * уникально, трассируемо до рана и не может столкнуться с ветками самого юзера. Ветка —
    * единица результата, и воркер обязан коммитить именно в неё, а не выдумывать свою.
    */
-  repository: { fullName: string; branch: string };
+  repository: { fullName: string; branch: string; revision?: string };
+  profileWorkspace?: {
+    bindingId: string;
+    objectBucket?: string;
+    artifacts: Array<{ path: string; key: string; sha256: string; size: number }>;
+    excludedPatterns: string[];
+  };
   /**
    * Токен публикации: клон `repository.fullName` и коммит выходов в его ветку.
    *
@@ -177,6 +183,7 @@ export interface ArtifactRef {
   mime: string;
   sha256: string;
   size: number;
+  objectKey?: string;
 }
 
 export interface LaunchResult {
@@ -481,6 +488,29 @@ export function validateLaunchRequest(input: unknown): LaunchRequest {
     // сталкивается с ветками юзера. Воркер обязан коммитить именно сюда.
     if (!isSafeBranchName(req['repository']['branch'])) {
       issues.push('repository.branch: expected a safe git branch name');
+    }
+    if (req['repository']['revision'] !== undefined && !/^[0-9a-f]{40}$/.test(String(req['repository']['revision']))) {
+      issues.push('repository.revision: expected commit sha');
+    }
+  }
+
+  if (req['profileWorkspace'] !== undefined) {
+    const profile = req['profileWorkspace'];
+    if (!isPlainObject(profile) || typeof profile['bindingId'] !== 'string' || !Array.isArray(profile['artifacts']) || !Array.isArray(profile['excludedPatterns'])) {
+      issues.push('profileWorkspace: expected bindingId, artifacts and excludedPatterns');
+    } else {
+      for (const [index, pattern] of profile['excludedPatterns'].entries()) {
+        if (typeof pattern !== 'string' || pattern.length > 500) issues.push(`profileWorkspace.excludedPatterns[${index}]: invalid pattern`);
+        else try { new RegExp(pattern); } catch { issues.push(`profileWorkspace.excludedPatterns[${index}]: invalid regex`); }
+      }
+      if (profile['artifacts'].length > 0 && (typeof profile['objectBucket'] !== 'string' || !/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(profile['objectBucket']))) {
+        issues.push('profileWorkspace.objectBucket: valid GCS bucket required for artifacts');
+      }
+      for (const [index, raw] of profile['artifacts'].entries()) {
+        if (!isPlainObject(raw) || !isSafeRelativePath(raw['path']) || typeof raw['key'] !== 'string' || !raw['key'].startsWith(`profiles/${String(req['profileId'])}/workspace/`) || !/^[0-9a-f]{64}$/.test(String(raw['sha256'])) || !Number.isSafeInteger(raw['size'])) {
+          issues.push(`profileWorkspace.artifacts[${index}]: invalid profile object`);
+        }
+      }
     }
   }
 

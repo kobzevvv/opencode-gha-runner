@@ -6,8 +6,9 @@
  */
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, mkdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -15,7 +16,7 @@ import { AGENT_CONFIG_TEMPLATE, installAgentConfig, renderAgentConfig } from '..
 import { failure, isRetryableCode } from '../src/contracts.js';
 import { validLaunchRequest } from './contracts.test.js';
 import type { LaunchRequest } from '../src/contracts.js';
-import { collectArtifacts } from '../src/runner/artifacts.js';
+import { collectArtifacts, GitHubRepoApi } from '../src/runner/artifacts.js';
 import { answerFromJsonEvents, buildLaunchResult, extractAnswer, failureForOutcome, publishArtifacts, SessionLog } from '../src/runner/main.js';
 import { capOutput, resolveAgentEnv, runAgent } from '../src/runner/exec.js';
 import { buildChildPath, buildLaunchCommand, ensureTraversable, identityName, parentDirs, type Identity } from '../src/runner/identity.js';
@@ -640,6 +641,7 @@ function githubApiMock(calls: string[]): typeof fetch {
       }
       return body({ object: { sha: 'run-sha-1111111111111111111111111111111111' } });
     }
+    if (target.includes('/contents/') && (init?.method ?? 'GET') === 'GET') return notFound;
     return new Response('', { status: 200 });
   }) as unknown as typeof fetch;
 }
@@ -670,11 +672,77 @@ test('baseRef доезжает в repo: без него клиент получ�
   await rm(dir, { recursive: true, force: true });
 });
 
+test('profile update includes the current GitHub Contents sha', async () => {
+  let written: Record<string, unknown> | null = null;
+  const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+    const target = String(url);
+    const body = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (target.endsWith('/repos/owner/name')) return body({ default_branch: 'main' });
+    if (target.includes('/git/ref/heads/main')) return body({ object: { sha: 'a'.repeat(40) } });
+    if (target.includes('/git/ref/heads/agent-run/run_1')) return body({ object: { sha: 'b'.repeat(40) } });
+    if (target.includes('/contents/notes%2Fstate.txt') || target.includes('/contents/notes/state.txt')) {
+      if (init?.method === 'PUT') {
+        written = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return body({ content: { sha: 'c'.repeat(40) } });
+      }
+      return body({ sha: 'old-file-sha' });
+    }
+    throw new Error(`unexpected GitHub request: ${target}`);
+  }) as typeof fetch;
+  const api = new GitHubRepoApi({ token: 'ghp_test_token_value', repo: 'owner/name', fetchImpl });
+  await api.pushFiles({ branch: 'agent-run/run_1', commitMessage: 'update profile', files: [{ path: 'notes/state.txt', content: Buffer.from('next') }] });
+  assert.equal(written?.['sha'], 'old-file-sha');
+});
+
+test('heavy profile output goes to object storage while Git receives only its index and checksum', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'oga-profile-output-'));
+  const previousPath = process.env['PATH'];
+  const previousRoot = process.env['FAKE_GCS_ROOT'];
+  try {
+    await mkdir(path.join(root, 'bin'));
+    await mkdir(path.join(root, 'bucket'));
+    const gcloud = path.join(root, 'bin', 'gcloud');
+    await writeFile(gcloud, '#!/bin/sh\nset -eu\nfrom="$3"\nto="$4"\ncase "$to" in gs://profile-bucket/*) to="$FAKE_GCS_ROOT/${to#gs://profile-bucket/}";; esac\nmkdir -p "$(dirname "$to")"\ncp "$from" "$to"\n');
+    await chmod(gcloud, 0o755);
+    process.env['PATH'] = `${path.join(root, 'bin')}:${previousPath ?? ''}`;
+    process.env['FAKE_GCS_ROOT'] = path.join(root, 'bucket');
+    const bytes = Buffer.alloc(1024 * 1024 + 1, 42);
+    await writeFile(path.join(root, 'large.bin'), bytes);
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    const requests: Array<{ path: string; body: string }> = [];
+    const baseFetch = githubApiMock([]);
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'GET' && String(url).includes('/contents/large.bin')) return new Response('', { status: 404 });
+      if (init?.method === 'PUT') requests.push({ path: String(url), body: String(init.body ?? '') });
+      return baseFetch(url, init);
+    }) as typeof fetch;
+    const log = new SessionLog();
+    await log.open(path.join(root, 'session.log'), '# profile run\n');
+    const spec = validLaunchRequest({ runId: 'run_1', profileId: 'profile-a', repository: { fullName: 'owner/name', branch: 'agent-run/run_1', revision: 'a'.repeat(40) }, profileWorkspace: { bindingId: 'binding-a', objectBucket: 'profile-bucket', artifacts: [], excludedPatterns: [] } } as never) as unknown as LaunchRequest;
+    const result = await publishArtifacts({
+      spec, runId: 'run_1', workspace: root, token: 'ghp_test_token_value', profileBucket: 'profile-bucket',
+      collected: { artifacts: [{ path: 'artifacts/large.bin', name: 'large.bin', mime: 'application/octet-stream', sha256, size: bytes.length }], missing: [], undeclared: [] },
+      outcome: { exitCode: 0, exitSignal: null, exitReason: 'completed', stdout: '', stderr: '', durationMs: 1, timedOut: false, outputTruncated: false },
+      startedAt: new Date(), sessionLog: log, fetchImpl,
+    });
+    assert.equal(result.note, null);
+    assert.equal(result.artifactRefs[0]?.path, 'large.bin');
+    assert.equal(result.artifactRefs[0]?.objectKey, `profiles/profile-a/workspace/run_1/${sha256}`);
+    assert.equal(requests.some((entry) => entry.path.includes('/contents/large.bin')), false);
+    assert.equal(requests.some((entry) => entry.path.includes('/contents/.trained-assist/artifacts.json')), true);
+    assert.deepEqual(await readFile(path.join(root, 'bucket', result.artifactRefs[0]!.objectKey!)), bytes);
+  } finally {
+    process.env['PATH'] = previousPath;
+    if (previousRoot === undefined) delete process.env['FAKE_GCS_ROOT']; else process.env['FAKE_GCS_ROOT'] = previousRoot;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('пустое тело на 404 — это «ветки нет», а не падение публикации', async () => {
   // Прокси и обрыв сети дают пустое тело, где GitHub обычно отдаёт JSON. Раньше `branchSha`
   // падал на `ref.data.object`, и публикация рана обрывалась вместо «создадим ветку».
   let seenRunBranch = false;
-  const emptyBody404 = async (url: string | URL): Promise<Response> => {
+  const emptyBody404 = async (url: string | URL, init?: RequestInit): Promise<Response> => {
     const target = String(url);
     if (target.endsWith('/repos/owner/name')) {
       return new Response(JSON.stringify({ default_branch: 'main' }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -690,6 +758,7 @@ test('пустое тело на 404 — это «ветки нет», а не �
       }
       return new Response(JSON.stringify({ object: { sha: 'run-sha-1111111111111111111111111111111111' } }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
+    if (target.includes('/contents/') && (init?.method ?? 'GET') === 'GET') return new Response('', { status: 404 });
     return new Response('', { status: 200 });
   };
 

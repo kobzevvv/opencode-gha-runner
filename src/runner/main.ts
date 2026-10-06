@@ -158,21 +158,20 @@ async function cloneWorkspace(
 ): Promise<void> {
   await mkdir(workspace, { recursive: true });
   const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
-  // Клон обязан идти под идентичностью рана: workspace принадлежит ей, и под
-  // пользователем раннера `git clone` падает с «Permission denied» на `.git`.
-  await runUnderIdentity(identity, 'git', ['clone', '--filter=blob:none', '--quiet', `https://github.com/${spec.repository.fullName}.git`, workspace], {
+  const gitEnv = {
     PATH: process.env['PATH'] ?? '/usr/bin:/bin',
-    // HOME — home идентичности: git пишет в `$HOME/.config/git`, а у раннера он 700.
     HOME: identity.home,
     GIT_TERMINAL_PROMPT: '0',
     GIT_CONFIG_COUNT: '1',
     GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
     GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${basic}`,
-  });
+  };
+  // Клон обязан идти под идентичностью рана: workspace принадлежит ей, и под
+  // пользователем раннера `git clone` падает с «Permission denied» на `.git`.
+  await runUnderIdentity(identity, 'git', ['clone', '--filter=blob:none', '--quiet', `https://github.com/${spec.repository.fullName}.git`, workspace], gitEnv);
   if (spec.repository.revision) {
-    await runUnderIdentity(identity, 'git', ['-C', workspace, 'checkout', '--detach', spec.repository.revision], {
-      PATH: process.env['PATH'] ?? '/usr/bin:/bin', HOME: identity.home, GIT_TERMINAL_PROMPT: '0',
-    });
+    // Частичный клон догружает blobs на checkout; этот fetch тоже требует токен.
+    await runUnderIdentity(identity, 'git', ['-C', workspace, 'checkout', '--detach', spec.repository.revision], gitEnv);
   }
 }
 

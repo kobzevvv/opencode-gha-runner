@@ -32,7 +32,9 @@ export async function materializeProfileObjects(spec: LaunchRequest, workspace: 
       if (current?.isSymbolicLink() || (current && !current.isDirectory())) throw new Error('profile artifact parent is not a directory');
       if (!current) {
         if (identity.enforced) {
-          await exec('sudo', ['install', '-d', '-m', '0700', '-o', String(identity.uid), '-g', String(identity.gid), parent]);
+          // The agent owns the directory; the trusted runner group needs read
+          // access later to compare unchanged objects before publication.
+          await exec('sudo', ['install', '-d', '-m', '0750', '-o', String(identity.uid), '-g', String(process.getgid?.() ?? identity.gid), parent]);
         } else {
           await mkdir(parent);
         }
@@ -47,9 +49,9 @@ export async function materializeProfileObjects(spec: LaunchRequest, workspace: 
       const bytes = await readFile(temporary);
       if (bytes.length !== artifact.size || createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) throw new Error('profile artifact checksum mismatch');
       if (identity.enforced) {
-        // The workspace is owned by the run identity. Copy verified bytes as root,
-        // assigning ownership atomically; the runner user cannot write there.
-        await exec('sudo', ['install', '-m', '0600', '-o', String(identity.uid), '-g', String(identity.gid), temporary, target]);
+        // The agent owns the file; the trusted runner group may read but not
+        // change it when comparing the post-run workspace to the input snapshot.
+        await exec('sudo', ['install', '-m', '0640', '-o', String(identity.uid), '-g', String(process.getgid?.() ?? identity.gid), temporary, target]);
       } else {
         await writeFile(target, bytes, { mode: 0o600 });
       }

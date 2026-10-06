@@ -30,11 +30,11 @@ GitHub Actions: .github/workflows/run-agent.yml
 Для постоянного профиля API передаёт закреплённый `repository.revision` и
 `profileWorkspace` с проверенными ref тяжёлых файлов. Воркер проверяет checkout этого
 commit, материализует объекты из приватного `GCS_PROFILE_BUCKET` с SHA-256, затем сохраняет
-объявленные `outputs` в ветку `agent-run/<runId>`. Файл свыше 1 MiB уходит в GCS;
+разрешённые изменения файлов, новые файлы, удаления и объявленные `outputs` в ветку
+`agent-run/<runId>`. Файл свыше 1 MiB уходит в GCS;
 `.trained-assist/artifacts.json` содержит его key, size и checksum. URL объекта не
-делается публичным: API отдаёт bytes по авторизованному маршруту artifacts. Новые
-изменения должны быть перечислены в `outputs` заявки; произвольное содержимое cwd воркер
-не публикует.
+делается публичным: API отдаёт bytes по авторизованному маршруту artifacts. Правила
+исключения профиля применяются к новым файлам, даже если агент изменил `.gitignore`.
 
 ## Почему ключ LLM не едет в `workflow_dispatch`
 

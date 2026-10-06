@@ -19,6 +19,7 @@ test('profile changes include edits, new files and object deletions but exclude 
     execFileSync('git', ['-C', root, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'base']);
     await writeFile(path.join(root, 'notes/old.txt'), 'after');
     await writeFile(path.join(root, 'notes/new.txt'), 'new');
+    await writeFile(path.join(root, '.gitignore'), 'notes/new.txt\n');
     await writeFile(path.join(root, '.env'), 'SECRET=value');
     await unlink(path.join(root, 'removed.txt'));
     const retained = Buffer.from('already stored');
@@ -26,7 +27,7 @@ test('profile changes include edits, new files and object deletions but exclude 
     const sha256 = createHash('sha256').update(retained).digest('hex');
     const spec = {
       profileWorkspace: {
-        bindingId: 'binding-a', excludedPatterns: ['(^|/)\\.env$'],
+        bindingId: 'binding-a', excludedPatterns: ['(^|/)\\.env$', '(^|/)\\.gitignore$'],
         artifacts: [
           { path: 'heavy.bin', key: 'profiles/profile-a/workspace/old/hash', sha256, size: retained.length },
           { path: 'gone.bin', key: 'profiles/profile-a/workspace/old/gone', sha256, size: retained.length },

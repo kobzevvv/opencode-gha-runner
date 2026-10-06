@@ -31,7 +31,8 @@ export async function collectProfileChanges(spec: LaunchRequest, workspace: stri
   rules.push(/^\.trained-assist(?:\/|$)/);
   const gitEnv = { PATH: process.env['PATH'] ?? '/usr/bin:/bin', HOME: identity.home, GIT_TERMINAL_PROMPT: '0' };
   const modified = await runUnderIdentity(identity, 'git', ['-C', workspace, 'diff', 'HEAD', '--name-only', '-z'], gitEnv);
-  const untracked = await runUnderIdentity(identity, 'git', ['-C', workspace, 'ls-files', '--others', '--exclude-standard', '-z'], gitEnv);
+  // Profile export policy, not the repository's .gitignore, decides which new files survive.
+  const untracked = await runUnderIdentity(identity, 'git', ['-C', workspace, 'ls-files', '--others', '-z'], gitEnv);
   const paths = new Set(`${modified.stdout}\0${untracked.stdout}`.split('\0').filter(Boolean));
   for (const artifact of spec.profileWorkspace.artifacts) {
     if (!(await lstat(path.resolve(workspace, artifact.path)).catch(() => null))) paths.add(artifact.path);

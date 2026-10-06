@@ -1,0 +1,41 @@
+name: profile-storage-smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  storage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCS_WORKLOAD_PROVIDER }}
+          service_account: ${{ vars.GCS_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          version: '>= 363.0.0'
+
+      - name: Verify private object round trip
+        env:
+          BUCKET: ${{ vars.GCS_PROFILE_BUCKET }}
+        run: |
+          set -euo pipefail
+          test -n "$BUCKET"
+          source_file="$(mktemp)"
+          downloaded_file="$(mktemp)"
+          object="gs://${BUCKET}/acceptance/gha/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/marker.txt"
+          trap 'gcloud storage rm "$object" --quiet >/dev/null 2>&1 || true; rm -f "$source_file" "$downloaded_file"' EXIT
+          printf 'profile-storage-smoke:%s\n' "$GITHUB_RUN_ID" > "$source_file"
+          gcloud storage cp "$source_file" "$object" --quiet
+          gcloud storage cp "$object" "$downloaded_file" --quiet
+          cmp "$source_file" "$downloaded_file"
+          echo 'private profile object round trip passed'

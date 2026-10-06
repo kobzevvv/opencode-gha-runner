@@ -41,6 +41,8 @@ import { resolveAgentEnv, runAgent, type ExecOutcome } from './exec.js';
 import { createRunIdentity, destroyRunIdentity, isBinaryAvailable, runUnderIdentity, type Identity } from './identity.js';
 import { installAgentConfigUnderIdentity } from './agent-config.js';
 import { uploadSessionLog, type LogUploadMode } from './logs.js';
+import { materializeProfileObjects, uploadProfileObject } from './profile-objects.js';
+import { collectProfileChanges } from './profile-changes.js';
 
 const exec = promisify(execFile);
 
@@ -53,6 +55,7 @@ export interface RunnerEnv {
   /** `gcs` в бою, `local` — чтобы прогнать приёмку без бакета. */
   LOG_UPLOAD?: LogUploadMode;
   GCS_LOG_BUCKET?: string;
+  GCS_PROFILE_BUCKET?: string;
   /** Корень, внутри которого создаётся workspace рана. */
   WORKSPACE_ROOT?: string;
   /** Дополнительные флаги агенту (модель и т.п.), через пробел. */
@@ -157,7 +160,7 @@ async function cloneWorkspace(
   const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
   // Клон обязан идти под идентичностью рана: workspace принадлежит ей, и под
   // пользователем раннера `git clone` падает с «Permission denied» на `.git`.
-  await runUnderIdentity(identity, 'git', ['clone', '--depth', '1', '--quiet', `https://github.com/${spec.repository.fullName}.git`, workspace], {
+  await runUnderIdentity(identity, 'git', ['clone', '--filter=blob:none', '--quiet', `https://github.com/${spec.repository.fullName}.git`, workspace], {
     PATH: process.env['PATH'] ?? '/usr/bin:/bin',
     // HOME — home идентичности: git пишет в `$HOME/.config/git`, а у раннера он 700.
     HOME: identity.home,
@@ -166,6 +169,11 @@ async function cloneWorkspace(
     GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
     GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${basic}`,
   });
+  if (spec.repository.revision) {
+    await runUnderIdentity(identity, 'git', ['-C', workspace, 'checkout', '--detach', spec.repository.revision], {
+      PATH: process.env['PATH'] ?? '/usr/bin:/bin', HOME: identity.home, GIT_TERMINAL_PROMPT: '0',
+    });
+  }
 }
 
 /** Шаг, который может отказать до старта агента. */
@@ -255,6 +263,7 @@ async function prepareWorkspace(options: {
 
   try {
     await cloneWorkspace(spec, workspace, publicationToken, identity);
+    await materializeProfileObjects(spec, workspace, identity, env.GCS_PROFILE_BUCKET);
   } catch (cause) {
     const safeSummary = redact(cause instanceof Error ? cause.message : String(cause), publicationToken);
     logLine(`clone failed: ${safeSummary}`);
@@ -311,18 +320,48 @@ export async function publishArtifacts(options: {
   sessionLog: SessionLog;
   /** Подмена GitHub API — только для тестов; боевой путь ходит в api.github.com. */
   fetchImpl?: typeof fetch;
+  profileBucket?: string;
+  profileDeletes?: string[];
 }): Promise<{ artifactRefs: ArtifactRef[]; repo: RepoRef; note: string | null }> {
   const { spec, runId, workspace, token, collected, outcome, startedAt, sessionLog } = options;
   const fallback: RepoRef = { fullName: spec.repository.fullName, branch: spec.repository.branch, commit: NULL_SHA };
 
   const files: Array<{ path: string; content: Buffer }> = [];
+  const heavyPaths: string[] = [];
+  const artifactRefs: ArtifactRef[] = collected.artifacts.map((artifact) => ({
+    ...artifact,
+    ...(spec.profileWorkspace ? { path: artifact.path.replace(/^artifacts\//, '') } : {}),
+  }));
+  const artifactIndex = new Map<string, { path: string; key: string; sha256: string; size: number; mime: string }>();
+  if (spec.profileWorkspace) {
+    // The agent may edit the checked-out index. Only refs verified by the API on
+    // prepare are trusted as the starting point for this run.
+    for (const entry of spec.profileWorkspace.artifacts) {
+      artifactIndex.set(entry.path, { path: entry.path, key: entry.key, sha256: entry.sha256, size: entry.size, mime: 'application/octet-stream' });
+    }
+    for (const deleted of options.profileDeletes ?? []) artifactIndex.delete(deleted);
+  }
   for (const artifact of collected.artifacts) {
     const source = path.resolve(workspace, artifact.path.replace(/^artifacts\//, ''));
+    const destination = spec.profileWorkspace ? artifact.path.replace(/^artifacts\//, '') : artifact.path;
     try {
-      files.push({ path: artifact.path, content: readFileSync(source) });
+      if (spec.profileWorkspace && artifact.size > 1024 * 1024) {
+        const key = await uploadProfileObject(spec, options.profileBucket, source, artifact.sha256);
+        artifactIndex.set(destination, { path: destination, key, sha256: artifact.sha256, size: artifact.size, mime: artifact.mime });
+        heavyPaths.push(destination);
+        const ref = artifactRefs.find((entry) => entry.path === destination);
+        if (ref) ref.objectKey = key;
+      } else {
+        artifactIndex.delete(destination);
+        files.push({ path: destination, content: readFileSync(source) });
+      }
     } catch {
       logLine(`declared output vanished before push: ${artifact.path}`);
+      throw new Error(`declared output ${artifact.path} could not be stored`);
     }
+  }
+  if (spec.profileWorkspace) {
+    files.push({ path: '.trained-assist/artifacts.json', content: Buffer.from(`${JSON.stringify({ version: 1, artifacts: [...artifactIndex.values()].sort((a, b) => a.path.localeCompare(b.path)) }, null, 2)}\n`) });
   }
   // Манифест кладём всегда: результат должен читаться из ветки, даже если выходов нет.
   files.push({
@@ -333,7 +372,7 @@ export async function publishArtifacts(options: {
       exitReason: outcome.exitReason,
       exitCode: outcome.exitCode,
       durationMs: outcome.durationMs,
-      artifacts: collected.artifacts,
+      artifacts: artifactRefs,
       missingOutputs: collected.missing,
       startedAt: startedAt.toISOString(),
       finishedAt: new Date().toISOString(),
@@ -347,15 +386,17 @@ export async function publishArtifacts(options: {
       ...(options.fetchImpl !== undefined ? { fetchImpl: options.fetchImpl } : {}),
     }).pushFiles({
       branch: spec.repository.branch,
+      ...(spec.repository.revision ? { baseRevision: spec.repository.revision } : {}),
       commitMessage: `opencode-gha-runner: ${runId} (${outcome.exitReason})`,
       files,
+      deletes: [...new Set([...heavyPaths, ...(options.profileDeletes ?? [])])],
     });
     sessionLog.append(
       'stdout',
       `\npushed ${pushed.pushed.length} file(s) to ${pushed.fullName}@${pushed.branch} @ ${pushed.commit}\n`,
     );
     return {
-      artifactRefs: collected.artifacts,
+      artifactRefs,
       repo: {
         fullName: pushed.fullName,
         branch: pushed.branch,
@@ -424,6 +465,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
   const sessionLog = new SessionLog();
   let claim: ClaimPayload | null = null;
   let identity: Identity | null = null;
+  let agentAttempted = false;
 
   try {
     // ── 1. claim ──────────────────────────────────────────────────────────────
@@ -534,6 +576,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     // Промпт в лог не пишем: он может содержать секреты, а лог уезжает в GCS.
     sessionLog.append('stdout', `\n$ ${claim.agentBinary} ${extraArgs.join(' ')} run <prompt>\n`);
 
+    agentAttempted = true;
     const outcome = await runAgent({
       identity,
       binary: claim.agentBinary,
@@ -548,6 +591,14 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
 
     // ── 5. артефакты в репозиторий юзера ───────────────────────────────────────
     const collected = await collectArtifacts(workspace, spec.outputs);
+    let profileDeletes: string[] = [];
+    if (spec.profileWorkspace) {
+      const changes = await collectProfileChanges(spec, workspace, identity);
+      const byPath = new Map(collected.artifacts.map((artifact) => [artifact.path, artifact]));
+      for (const artifact of changes.artifacts) byPath.set(artifact.path, artifact);
+      collected.artifacts = [...byPath.values()];
+      profileDeletes = changes.deletes;
+    }
     const published = await publishArtifacts({
       spec,
       runId,
@@ -557,6 +608,8 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       outcome,
       startedAt,
       sessionLog,
+      profileBucket: env.GCS_PROFILE_BUCKET,
+      profileDeletes,
     });
     if (published.note) outcome.stderr += `\n${published.note}\n`;
 
@@ -606,6 +659,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
         `${gatewayUrl}${REPORT_PATH(runId)}`,
         claim.reportToken,
         emptyResult(runId, claim.spec.repository, {
+          ...(agentAttempted && claim.spec.profileWorkspace ? { status: 'started' } : {}),
           failure: failure('WORKER_INTERNAL', 'finalization', safeSummary),
           stderr: safeSummary,
         }),

@@ -27,6 +27,15 @@ GitHub Actions: .github/workflows/run-agent.yml
 наш API: GET /v1/runs/{runId} → LaunchResult
 ```
 
+Для постоянного профиля API передаёт закреплённый `repository.revision` и
+`profileWorkspace` с проверенными ref тяжёлых файлов. Воркер проверяет checkout этого
+commit, материализует объекты из приватного `GCS_PROFILE_BUCKET` с SHA-256, затем сохраняет
+разрешённые изменения файлов, новые файлы, удаления и объявленные `outputs` в ветку
+`agent-run/<runId>`. Файл свыше 1 MiB уходит в GCS;
+`.trained-assist/artifacts.json` содержит его key, size и checksum. URL объекта не
+делается публичным: API отдаёт bytes по авторизованному маршруту artifacts. Правила
+исключения профиля применяются к новым файлам, даже если агент изменил `.gitignore`.
+
 ## Почему ключ LLM не едет в `workflow_dispatch`
 
 `workflow_dispatch` публичного репозитория показывает `inputs` в метаданных прогона и в
@@ -345,7 +354,8 @@ queued», а при параллельных запусках это мог бы
 | `GATEWAY_URL` (variable) | Actions → Variables | публичный адрес шлюза |
 | `LOG_UPLOAD` (variable) | Actions → Variables | `gcs` (по умолчанию) или `local` для приёмки без бакета |
 | `GCS_LOG_BUCKET` (variable) | Actions → Variables | бакет для логов сессии |
-| `GCS_WORKLOAD_PROVIDER`, `GCS_SERVICE_ACCOUNT` (env) | Environments | Workload Identity Federation для `google-github-actions/auth` |
+| `GCS_PROFILE_BUCKET` (variable) | Actions → Variables | приватный bucket профиля; должен совпадать с `GCS_BUCKET` у API, WIF service account требует object read/write |
+| `GCS_WORKLOAD_PROVIDER`, `GCS_SERVICE_ACCOUNT` (variables) | Actions → Variables | WIF identity для `gcloud storage`; workflow выдаёт `id-token: write` и ставит Cloud SDK |
 | `AGENT_ARGS` (variable) | Actions → Variables | доп. флаги агенту, например `-m ladder/free` |
 
 `GITHUB_TOKEN` джобы для этого не годится: он ограничен одним репозиторием, а артефакты

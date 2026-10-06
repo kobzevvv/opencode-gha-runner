@@ -236,10 +236,12 @@ export class GitHubRepoApi {
 
   async pushFiles(options: {
     branch: string;
+    baseRevision?: string;
     commitMessage: string;
     files: Array<{ path: string; content: Buffer }>;
+    deletes?: string[];
   }): Promise<PushResult> {
-    if (options.files.length === 0) {
+    if (options.files.length === 0 && (options.deletes?.length ?? 0) === 0) {
       return { fullName: this.repo, commit: NULL_SHA, branch: options.branch, pushed: [] };
     }
 
@@ -253,13 +255,25 @@ export class GitHubRepoApi {
       branch = baseBranchFallback;
       useBranch = undefined;
     } else if ((await this.branchSha(branch)) === null) {
-      if (!(await this.createBranch(branch, base.sha))) {
+      if (!(await this.createBranch(branch, options.baseRevision ?? base.sha))) {
         throw new Error(`could not create branch ${branch}`);
       }
     }
 
     const pushed: string[] = [];
+    for (const filePath of options.deletes ?? []) {
+      const current = await this.request<{ sha?: string }>('GET', `/repos/${this.repo}/contents/${filePathToApi(filePath)}?ref=${encodeURIComponent(branch)}`);
+      if (current.status === 404) continue;
+      if (current.status !== 200 || !current.data?.sha) throw new Error(`could not inspect ${filePath} before deleting Git blob`);
+      const deleted = await this.request('DELETE', `/repos/${this.repo}/contents/${filePathToApi(filePath)}`, {
+        message: options.commitMessage, sha: current.data.sha, branch,
+      });
+      if (deleted.status !== 200) throw new Error(`could not delete ${filePath} from Git`);
+    }
     for (const file of options.files) {
+      const current = await this.request<{ sha?: string }>('GET', `/repos/${this.repo}/contents/${filePathToApi(file.path)}?ref=${encodeURIComponent(branch)}`);
+      if (current.status !== 200 && current.status !== 404) throw new Error(`could not inspect ${file.path} before writing Git blob`);
+      if (current.status === 200 && !current.data?.sha) throw new Error(`could not read sha for ${file.path}`);
       const response = await this.request<ContentsResponse>(
         'PUT',
         `/repos/${this.repo}/contents/${filePathToApi(file.path)}`,
@@ -267,6 +281,7 @@ export class GitHubRepoApi {
           message: options.commitMessage,
           content: file.content.toString('base64'),
           branch: useBranch,
+          ...(current.status === 200 ? { sha: current.data!.sha } : {}),
         },
       );
       if (response.status !== 200 && response.status !== 201) {

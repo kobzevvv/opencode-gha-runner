@@ -30,7 +30,13 @@ export async function materializeProfileObjects(spec: LaunchRequest, workspace: 
       parent = path.join(parent, segment);
       const current = await lstat(parent).catch(() => null);
       if (current?.isSymbolicLink() || (current && !current.isDirectory())) throw new Error('profile artifact parent is not a directory');
-      if (!current) await mkdir(parent);
+      if (!current) {
+        if (identity.enforced) {
+          await exec('sudo', ['install', '-d', '-m', '0700', '-o', String(identity.uid), '-g', String(identity.gid), parent]);
+        } else {
+          await mkdir(parent);
+        }
+      }
     }
     const existing = await lstat(target).catch(() => null);
     if (existing?.isSymbolicLink() || (existing && !existing.isFile())) throw new Error('profile artifact target is not a regular file');
@@ -40,8 +46,13 @@ export async function materializeProfileObjects(spec: LaunchRequest, workspace: 
       await exec('gcloud', ['storage', 'cp', `gs://${bucket}/${artifact.key}`, temporary, '--quiet']);
       const bytes = await readFile(temporary);
       if (bytes.length !== artifact.size || createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) throw new Error('profile artifact checksum mismatch');
-      await writeFile(target, bytes, { mode: 0o600 });
-      if (identity.enforced) await exec('sudo', ['chown', '-R', `${identity.uid}:${identity.gid}`, target]);
+      if (identity.enforced) {
+        // The workspace is owned by the run identity. Copy verified bytes as root,
+        // assigning ownership atomically; the runner user cannot write there.
+        await exec('sudo', ['install', '-m', '0600', '-o', String(identity.uid), '-g', String(identity.gid), temporary, target]);
+      } else {
+        await writeFile(target, bytes, { mode: 0o600 });
+      }
     } finally {
       await rm(staging, { recursive: true, force: true });
     }

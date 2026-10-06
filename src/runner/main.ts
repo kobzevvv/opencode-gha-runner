@@ -84,6 +84,8 @@ function logLine(line: string): void {
 
 export class SessionLog {
   private ready = false;
+  private writes: Promise<void> = Promise.resolve();
+  private writeFailure: Error | null = null;
 
   async open(filePath: string, header: string): Promise<void> {
     await mkdir(path.dirname(filePath), { recursive: true });
@@ -96,7 +98,20 @@ export class SessionLog {
 
   append(stream: 'stdout' | 'stderr', text: string): void {
     if (!this.ready) return;
-    void appendFile(this.filePath, `[${stream}] ${text}`, 'utf8').catch(() => undefined);
+    this.writes = this.writes.then(async () => {
+      if (this.writeFailure) return;
+      try {
+        await appendFile(this.filePath, `[${stream}] ${text}`, 'utf8');
+      } catch (cause) {
+        this.writeFailure = cause instanceof Error ? cause : new Error(String(cause));
+      }
+    });
+  }
+
+  /** Wait until every output chunk has reached the local session log before upload. */
+  async flush(): Promise<void> {
+    await this.writes;
+    if (this.writeFailure) throw new Error(`session log write failed: ${this.writeFailure.message}`);
   }
 }
 
@@ -619,6 +634,13 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     // ── 6. лог сессии в GCS ───────────────────────────────────────────────────
     let logUrl = '';
     let logTruncated = false;
+    try {
+      await sessionLog.flush();
+    } catch (cause) {
+      const safeSummary = redact(cause instanceof Error ? cause.message : String(cause));
+      logLine(`session log flush failed: ${safeSummary}`);
+      outcome.stderr += `\nsession log flush failed: ${safeSummary}\n`;
+    }
     try {
       const uploaded = await uploadSessionLog({
         mode: env.LOG_UPLOAD === 'local' ? 'local' : 'gcs',

@@ -36,6 +36,8 @@ export interface LogUploadResult {
 }
 
 const BUCKET_NAME = /^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/;
+const UPLOAD_ATTEMPTS = 4;
+const UPLOAD_RETRY_BASE_MS = 500;
 
 /**
  * Обрезает лог до `maxLogBytes`, оставляя хвост: в хвосте — ошибка агента и ответ
@@ -77,18 +79,30 @@ export async function uploadSessionLog(options: LogUploadOptions): Promise<LogUp
 
   const prefix = options.objectPrefix ?? `${options.runId}/session.log`;
   const objectPath = prefix.endsWith('/') ? `${prefix}session.log` : prefix;
+  const objectUri = `gs://${bucket}/${objectPath}`;
 
-  await exec('gcloud', [
-    'storage',
-    'cp',
-    options.localPath,
-    `gs://${bucket}/${objectPath}`,
-    '--quiet',
-  ]);
-
-  // Приватный бакет даёт 403 по https-ссылке. Поэтому объект делаем читаемым и
-  // складываем ссылку, которую действительно можно открыть.
-  await exec('gcloud', ['storage', 'objects', 'update', `gs://${bucket}/${objectPath}`, '--acl=publicRead', '--recursive', '--quiet']);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < UPLOAD_ATTEMPTS; attempt += 1) {
+    try {
+      await exec('gcloud', ['storage', 'cp', options.localPath, objectUri, '--quiet']);
+      // Verify durable custody before exposing the URL or reporting the run complete.
+      const { stdout } = await exec('gcloud', ['storage', 'objects', 'describe', objectUri, '--format=json']);
+      const uploaded = JSON.parse(stdout) as { size?: string | number };
+      if (Number(uploaded.size) !== capped.size) {
+        throw new Error(`uploaded session log size mismatch: expected ${capped.size}, got ${String(uploaded.size)}`);
+      }
+      // The current API contract serves session logs through a direct HTTPS URL.
+      await exec('gcloud', ['storage', 'objects', 'update', objectUri, '--acl=publicRead', '--recursive', '--quiet']);
+      lastError = null;
+      break;
+    } catch (cause) {
+      lastError = cause;
+      if (attempt + 1 < UPLOAD_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, UPLOAD_RETRY_BASE_MS * 2 ** attempt));
+      }
+    }
+  }
+  if (lastError) throw new Error(`session log upload/verification failed after ${UPLOAD_ATTEMPTS} attempts: ${String((lastError as Error)?.message ?? lastError)}`);
 
   return {
     logUrl: `https://storage.googleapis.com/${bucket}/${objectPath}`,

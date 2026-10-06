@@ -69,17 +69,17 @@ jobs:
 
       - name: Run agent
         env:
-          GATEWAY_URL: ${{ github.ref_name == 'integration/final-answer-v1-20261005' && 'https://trained-assist-native-worker-v1-sandbox.skillset-apply.workers.dev' || vars.GATEWAY_URL }}
+          GATEWAY_URL: ${{ (github.ref_name == 'integration/final-answer-v1-20261005' || github.ref_name == 'integration/native-cli-composed-v1-20261005' || github.ref_name == 'integration/native-stop-hardened-v1-20261006') && 'https://trained-assist-native-worker-v1-sandbox.skillset-apply.workers.dev' || vars.GATEWAY_URL }}
           RUN_ID: ${{ inputs.run_id }}
           CLAIM_TOKEN: ${{ inputs.claim_token }}
-          REQUIRE_CLAIM_AUTH: ${{ github.ref_name == 'integration/final-answer-v1-20261005' && 'true' || '' }}
-          CLAIM_AUTH_TOKEN: ${{ github.ref_name == 'integration/final-answer-v1-20261005' && secrets.INTEGRATOR_V1_CLAIM_AUTH_TOKEN || '' }}
+          REQUIRE_CLAIM_AUTH: ${{ (github.ref_name == 'integration/final-answer-v1-20261005' || github.ref_name == 'integration/native-cli-composed-v1-20261005' || github.ref_name == 'integration/native-stop-hardened-v1-20261006') && 'true' || '' }}
+          CLAIM_AUTH_TOKEN: ${{ (github.ref_name == 'integration/final-answer-v1-20261005' || github.ref_name == 'integration/native-cli-composed-v1-20261005' || github.ref_name == 'integration/native-stop-hardened-v1-20261006') && secrets.INTEGRATOR_V1_CLAIM_AUTH_TOKEN || '' }}
           ARTIFACTS_TOKEN: ${{ secrets.ARTIFACTS_TOKEN }}
           LOG_UPLOAD: ${{ vars.LOG_UPLOAD || 'gcs' }}
           GCS_LOG_BUCKET: ${{ vars.GCS_LOG_BUCKET }}
           WORKSPACE_ROOT: ${{ runner.temp }}
           AGENT_ARGS: ${{ vars.AGENT_ARGS }}
-          AGENT_OUTPUT_FORMAT: ${{ github.ref_name == 'integration/final-answer-v1-20261005' && 'json' || '' }}
+          AGENT_OUTPUT_FORMAT: ${{ (github.ref_name == 'integration/final-answer-v1-20261005' || github.ref_name == 'integration/native-cli-composed-v1-20261005' || github.ref_name == 'integration/native-stop-hardened-v1-20261006') && 'json' || '' }}
           AGENT_CONFIG: ${{ vars.AGENT_CONFIG }}
           # Passwordless sudo — штатное свойство GitHub-hosted раннера, поэтому
           # per_run_unix_identity ставится по-настоящему, а не имитируется.

@@ -480,3 +480,12 @@ npx wrangler deploy
 | `src/runner/artifacts.ts` | сбор выходов с проверкой выхода из workspace, пуш в репозиторий |
 | `src/runner/logs.ts` | лог сессии в GCS, наружу только ссылка |
 | `.github/workflows/run-agent.yml` | джоба: сборка, тесты, opencode, запуск |
+
+## Source-only STOP candidate
+
+`integration/native-stop-hardened-v1-20261006` combines the cancellation/private-stdin
+composition with checkout credential isolation and the pinned OpenCode 1.18.34 install.
+All four workflow guards admit this candidate, the deployed `integration/native-cli-composed-v1-20261005`
+and legacy `integration/final-answer-v1-20261005`; other refs retain their existing fallbacks.
+This is staging source, not activation: `wrangler.integration-v1.toml` and the deployed
+`GITHUB_REF` are unchanged. Any cutover requires separate owner approval and live validation.

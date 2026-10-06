@@ -21,14 +21,52 @@ test('branch workflow claim URL equals its owned config endpoint and checkout pi
   const endpoint = sandbox.match(/^PUBLIC_BASE_URL = "([^"]+)"/m)?.[1];
   const branch = sandbox.match(/^GITHUB_REF = "([^"]+)"/m)?.[1];
   assert.ok(endpoint && branch);
-  assert.ok(workflow.includes(`GATEWAY_URL: \${{ github.ref_name == '${branch}' && '${endpoint}' || vars.GATEWAY_URL }}`));
+  const condition = `(github.ref_name == '${branch}' || github.ref_name == 'integration/native-cli-composed-v1-20261005' || github.ref_name == 'integration/native-stop-hardened-v1-20261006')`;
+  assert.equal(workflow.split(condition).length - 1, 4);
+  assert.ok(workflow.includes(`GATEWAY_URL: \${{ ${condition} && '${endpoint}' || vars.GATEWAY_URL }}`));
   assert.ok(workflow.includes('ref: ${{ github.sha }}'));
-  assert.ok(workflow.includes(`AGENT_OUTPUT_FORMAT: \${{ github.ref_name == '${branch}' && 'json' || '' }}`));
+  assert.ok(workflow.includes(`AGENT_OUTPUT_FORMAT: \${{ ${condition} && 'json' || '' }}`));
   assert.ok(workflow.includes('AGENT_ARGS: ${{ vars.AGENT_ARGS }}'));
-  assert.ok(workflow.includes(`REQUIRE_CLAIM_AUTH: \${{ github.ref_name == '${branch}' && 'true' || '' }}`));
-  assert.ok(workflow.includes(`CLAIM_AUTH_TOKEN: \${{ github.ref_name == '${branch}' && secrets.INTEGRATOR_V1_CLAIM_AUTH_TOKEN || '' }}`));
+  assert.ok(workflow.includes(`REQUIRE_CLAIM_AUTH: \${{ ${condition} && 'true' || '' }}`));
+  assert.ok(workflow.includes(`CLAIM_AUTH_TOKEN: \${{ ${condition} && secrets.INTEGRATOR_V1_CLAIM_AUTH_TOKEN || '' }}`));
   assert.ok(sandbox.includes('REQUIRE_CLAIM_AUTH = "true"'));
 });
+
+for (const [ref, admitted] of [
+  ['integration/final-answer-v1-20261005', true],
+  ['integration/native-cli-composed-v1-20261005', true],
+  ['integration/native-stop-hardened-v1-20261006', true],
+  ['main', false],
+  ['integration/native-cli-safe-path-v1-20261005', false],
+  ['integration/native-stop-hardened-v1-20261006-other', false],
+] as const) {
+  test(`workflow scoped settings for ${ref}`, () => {
+    const workflow = readFileSync('.github/workflows/run-agent.yml', 'utf8');
+    const endpoint = readFileSync('wrangler.integration-v1.toml', 'utf8').match(/^PUBLIC_BASE_URL = "([^"]+)"/m)?.[1];
+    assert.ok(endpoint);
+    const fields = {
+      GATEWAY_URL: [`'${endpoint}'`, 'vars.GATEWAY_URL'],
+      REQUIRE_CLAIM_AUTH: ["'true'", "''"],
+      CLAIM_AUTH_TOKEN: ['secrets.INTEGRATOR_V1_CLAIM_AUTH_TOKEN', "''"],
+      AGENT_OUTPUT_FORMAT: ["'json'", "''"],
+    };
+    for (const [field, branches] of Object.entries(fields)) {
+      const expression = workflow.match(new RegExp(`^\\s+${field}: \\$\\{\\{ \\((.*?)\\) && (.*?) \\|\\| (.*?) \\}\\}$`, 'm'));
+      assert.ok(expression);
+      const clauses = expression[1]?.split(' || ');
+      assert.ok(clauses);
+      const matches = clauses.map(clause => {
+        const parsed = /^github\.ref_name == '([^']+)'$/.exec(clause);
+        assert.ok(parsed);
+        return parsed[1] === ref;
+      });
+      assert.equal(matches.some(Boolean), admitted);
+      assert.equal(expression[2], branches[0]);
+      assert.equal(expression[3], branches[1]);
+      assert.equal(matches.some(Boolean) ? expression[2] : expression[3], admitted ? branches[0] : branches[1]);
+    }
+  });
+}
 
 test('workflow checkout does not persist its host credential for the engine identity', () => {
   const workflow = readFileSync('.github/workflows/run-agent.yml', 'utf8');

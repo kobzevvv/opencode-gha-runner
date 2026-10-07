@@ -30,7 +30,7 @@ test('staged profile archive is owned by the run identity and unreadable by othe
   }
 });
 
-test('profile snapshot is checksum-verified, extracted as a git baseline, and uploaded via run capability', async () => {
+test('profile snapshot accepts tar root entries, verifies checksum, and extracts as a git baseline', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'profile-snapshot-'));
   try {
     const source = path.join(root, 'source');
@@ -39,7 +39,7 @@ test('profile snapshot is checksum-verified, extracted as a git baseline, and up
     const before = Buffer.from('before');
     await writeFile(path.join(source, 'notes/state.txt'), before);
     const archive = path.join(root, 'snapshot.tar.gz');
-    execFileSync('tar', ['-czf', archive, '-C', source, 'notes/state.txt']);
+    execFileSync('tar', ['-czf', archive, '-C', source, '.']);
     const snapshot = await readFile(archive);
     const identity: Identity = { name: 'test', uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0, home: root, workspace, enforced: false };
     const spec = {

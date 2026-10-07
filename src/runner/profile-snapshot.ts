@@ -93,7 +93,12 @@ export async function materializeProfileSnapshot(
     const entries = names.stdout.split('\n').filter(Boolean);
     if (entries.length > 100_000) throw new Error('profile snapshot has too many entries');
     for (const name of entries) {
-      const normalized = name.endsWith('/') ? name.slice(0, -1) : name;
+      // GNU tar commonly prefixes entries from `tar -C <root> .` with `./` and
+      // includes the root directory itself as `./`. Treat those as archive
+      // notation, while still validating every path component after stripping it.
+      let normalized = name.replace(/\/+$/, '');
+      while (normalized.startsWith('./')) normalized = normalized.slice(2);
+      if (normalized === '.') continue;
       if (!isSafeRelativePath(normalized)) throw new Error(`unsafe profile snapshot path: ${name}`);
       if (normalized === '.git' || normalized.startsWith('.git/')) throw new Error('profile snapshot may not contain a git metadata directory');
     }

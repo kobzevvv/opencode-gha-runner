@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -38,6 +38,8 @@ test('profile snapshot accepts tar root entries, verifies checksum, and extracts
     await mkdir(path.join(source, 'notes'), { recursive: true });
     const before = Buffer.from('before');
     await writeFile(path.join(source, 'notes/state.txt'), before);
+    // API snapshots can carry a restrictive mode from their temporary root directory.
+    await chmod(source, 0o700);
     const archive = path.join(root, 'snapshot.tar.gz');
     execFileSync('tar', ['-czf', archive, '-C', source, '.']);
     const snapshot = await readFile(archive);
@@ -52,6 +54,7 @@ test('profile snapshot accepts tar root entries, verifies checksum, and extracts
     } as unknown as LaunchRequest;
     await materializeProfileSnapshot(spec, workspace, identity, async () => new Response(snapshot));
     assert.equal(await readFile(path.join(workspace, 'notes/state.txt'), 'utf8'), 'before');
+    assert.equal((await stat(workspace)).mode & 0o777, 0o750, 'archive root metadata must not make the run workspace inaccessible to its host');
     assert.equal((await readdir(workspace)).some((name) => name.startsWith('.profile-snapshot-')), false, 'private snapshot archive is removed before agent launch');
     execFileSync('git', ['-C', workspace, 'status', '--porcelain']);
 

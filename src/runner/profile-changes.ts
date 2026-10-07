@@ -65,7 +65,9 @@ export async function collectProfileChanges(spec: LaunchRequest, workspace: stri
     const prior = inputArtifacts.get(relative);
     if (prior && prior.sha256 === sha256 && prior.size === bytes.length) continue;
     totalBytes += bytes.length;
-    if (artifacts.length >= 5000 || totalBytes > 128 * 1024 * 1024) throw new Error('profile changes exceed export policy limits');
+    if (artifacts.length >= 5000 || bytes.length > 50 * 1024 * 1024 || totalBytes > 100 * 1024 * 1024) {
+      throw new Error('profile changes exceed API saveback limits (50 MB per file, 100 MB total)');
+    }
     artifacts.push({ path: `artifacts/${relative}`, name: path.posix.basename(relative), mime: mimeFor(relative), sha256, size: bytes.length });
   }
   return { artifacts, deletes };

@@ -125,6 +125,28 @@ test('валидирует форму repository.fullName', () => {
   assert.throws(() => validateLaunchRequest(validLaunchRequest({ repository: { fullName: 'a/b/c' } } as never)));
 });
 
+test('profile saveback требует подписанный snapshot и run-scoped upload capability без GitHub publicationToken', () => {
+  const profileWorkspace = {
+    bindingId: 'binding-a',
+    snapshotUrl: 'https://storage.example/signed-snapshot',
+    snapshotSha256: 'a'.repeat(64),
+    snapshotSize: 123,
+    savebackUrl: 'https://api.example/v1/worker/launches/run/profile-changes',
+    savebackToken: 'x'.repeat(48),
+    artifacts: [],
+    excludedPatterns: [],
+  };
+  assert.doesNotThrow(() => validateLaunchRequest(validLaunchRequest({ profileWorkspace } as never)));
+  assert.throws(
+    () => validateLaunchRequest(validLaunchRequest({ profileWorkspace, publicationToken: 'ghp_profile_token' } as never)),
+    (error: unknown) => error instanceof ValidationError && error.issues.some((issue) => issue.includes('forbidden for profile runs')),
+  );
+  assert.throws(
+    () => validateLaunchRequest(validLaunchRequest({ profileWorkspace: { ...profileWorkspace, snapshotUrl: 'http://storage.example/snapshot' } } as never)),
+    (error: unknown) => error instanceof ValidationError && error.issues.some((issue) => issue.includes('snapshotUrl')),
+  );
+});
+
 test('требует известный режим изоляции', () => {
   assert.throws(() => validateLaunchRequest(validLaunchRequest({ isolation: { mode: 'docker' } } as never)));
   assert.doesNotThrow(() => validateLaunchRequest(validLaunchRequest({ isolation: { mode: 'none' } } as never)));

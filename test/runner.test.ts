@@ -539,6 +539,17 @@ test('LaunchResult содержит ровно те поля, что валид�
   ]);
 });
 
+test('LaunchResult передаёт манифест run-scoped profile saveback', () => {
+  const result = buildLaunchResult({
+    runId: 'run_1',
+    outcome: { exitCode: 0, exitSignal: null, exitReason: 'completed', stdout: '', stderr: '', durationMs: 1, timedOut: false, outputTruncated: false },
+    answer: { source: null }, artifacts: [], repo: { fullName: 'o/r', branch: 'agent-run/run_1', commit: '0'.repeat(40) },
+    logUrl: '', outputTruncated: false,
+    profileChanges: { files: [{ path: 'notes/state.md', sha256: 'a'.repeat(64), size: 4 }], deletes: ['notes/old.md'] },
+  });
+  assert.deepEqual(result.profileChanges, { files: [{ path: 'notes/state.md', sha256: 'a'.repeat(64), size: 4 }], deletes: ['notes/old.md'] });
+});
+
 test('status — «движок запустился», а не «чем кончился ран»', () => {
   const base = {
     runId: 'run_1',

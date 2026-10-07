@@ -9,9 +9,9 @@
  * Шаги:
  *   1. claim   → `{ spec, llmKey, reportToken, agentBinary }`
  *   2. ident   → per-run Unix-идентичность (или честный отказ на preflight)
- *   3. clone   → `repository.fullName` в `cwd`
+ *   3. workspace → signed profile snapshot (profile run) или клон `repository.fullName`
  *   4. run     → агент под этой идентичностью, только с разрешённым env, по таймауту
- *   5. collect → объявленные выходы + манифест → коммит в репозиторий юзера
+ *   5. collect → profile saveback через run-scoped API capability или обычный GitHub publish
  *   6. log     → GCS, наружу только `logUrl`
  *   7. report  → `LaunchResult` по одноразовому report-токену
  *
@@ -43,6 +43,7 @@ import { installAgentConfigUnderIdentity } from './agent-config.js';
 import { uploadSessionLog, type LogUploadMode } from './logs.js';
 import { materializeProfileObjects, uploadProfileObject } from './profile-objects.js';
 import { collectProfileChanges } from './profile-changes.js';
+import { materializeProfileSnapshot, uploadProfileChanges } from './profile-snapshot.js';
 
 const exec = promisify(execFile);
 
@@ -181,7 +182,7 @@ type Step<T> = { ok: true; value: T } | { ok: false; failure: Failure; exit: num
 interface PreparedWorkspace {
   identity: Identity;
   workspace: string;
-  artifactsToken: string; // токен публикации рана
+  artifactsToken: string; // пусто для profile runs: публикация выполняется API saver'ом
   logFile: string;
 }
 
@@ -232,6 +233,18 @@ async function prepareWorkspace(options: {
     );
   }
   logLine(`identity=${identity.name} uid=${identity.uid} enforced=${identity.enforced}`);
+
+  // Profile snapshot runs never receive GitHub credentials: API publishes their saveback.
+  if (spec.profileWorkspace) {
+    try {
+      await materializeProfileSnapshot(spec, workspace, identity);
+    } catch (cause) {
+      const safeSummary = redact(cause instanceof Error ? cause.message : String(cause), spec.profileWorkspace.savebackToken);
+      logLine(`profile snapshot failed: ${safeSummary}`);
+      return refuse(failure('PROFILE_SNAPSHOT_INVALID', 'preflight', safeSummary), RUNNER_EXIT.cloneFailed);
+    }
+    return { ok: true, value: { identity, workspace, artifactsToken: '', logFile: path.join(workspaceRoot, 'session-logs', runId, 'session.log') } };
+  }
 
   // Токен публикации — из запроса, а не из `ARTIFACTS_TOKEN` репозитория кольца.
   // Джоба живёт в чужом репозитории, и токен кольца не имеет прав на репозиторий задачи:
@@ -423,6 +436,7 @@ export function buildLaunchResult(input: {
   repo: RepoRef;
   logUrl: string;
   outputTruncated: boolean;
+  profileChanges?: LaunchResult['profileChanges'];
   failure?: Failure;
 }): LaunchResult {
   const { outcome } = input;
@@ -448,6 +462,7 @@ export function buildLaunchResult(input: {
     artifacts: input.artifacts,
     logUrl: input.logUrl,
     repo: input.repo,
+    ...(input.profileChanges ? { profileChanges: input.profileChanges } : {}),
     ...(input.failure ? { failure: input.failure } : {}),
   };
 }
@@ -491,6 +506,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     const secrets = [
       claim.llmKey,
       spec.publicationToken,
+      spec.profileWorkspace?.savebackToken,
       env.ARTIFACTS_TOKEN,
       ...Object.values(mcpSecrets),
     ];
@@ -591,25 +607,41 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
     // ── 5. артефакты в репозиторий юзера ───────────────────────────────────────
     const collected = await collectArtifacts(workspace, spec.outputs);
     let profileDeletes: string[] = [];
+    let profileChanges: LaunchResult['profileChanges'];
+    let profileSavebackNote: string | null = null;
     if (spec.profileWorkspace) {
       const changes = await collectProfileChanges(spec, workspace, identity);
       const byPath = new Map(collected.artifacts.map((artifact) => [artifact.path, artifact]));
       for (const artifact of changes.artifacts) byPath.set(artifact.path, artifact);
       collected.artifacts = [...byPath.values()];
       profileDeletes = changes.deletes;
+      try {
+        // Only attest the complete manifest after every file is durably accepted by
+        // the API. A partial upload must never authorize deletion or publication.
+        profileChanges = await uploadProfileChanges({
+          spec,
+          workspace,
+          identity,
+          files: changes.artifacts.map((entry) => ({ path: entry.path, sha256: entry.sha256, size: entry.size })),
+          deletes: changes.deletes,
+        });
+      } catch (cause) {
+        const summary = redact(cause instanceof Error ? cause.message : String(cause), spec.profileWorkspace.savebackToken);
+        logLine(`profile saveback failed: ${summary}`);
+        profileSavebackNote = `profile saveback failed: ${summary}`;
+      }
     }
-    const published = await publishArtifacts({
-      spec,
-      runId,
-      workspace,
-      token: artifactsToken,
-      collected,
-      outcome,
-      startedAt,
-      sessionLog,
-      profileBucket: env.GCS_PROFILE_BUCKET,
-      profileDeletes,
-    });
+    const published: { artifactRefs: ArtifactRef[]; repo: RepoRef; note: string | null; profileChanges?: LaunchResult['profileChanges'] } = spec.profileWorkspace
+      ? {
+          artifactRefs: collected.artifacts.map((entry) => ({ ...entry, path: entry.path.replace(/^artifacts\//, '') })),
+          repo: { fullName: spec.repository.fullName, branch: spec.repository.branch, commit: NULL_SHA },
+          note: profileSavebackNote,
+          ...(profileChanges ? { profileChanges } : {}),
+        }
+      : await publishArtifacts({
+          spec, runId, workspace, token: artifactsToken, collected, outcome, startedAt, sessionLog,
+          profileBucket: env.GCS_PROFILE_BUCKET, profileDeletes,
+        });
     if (published.note) outcome.stderr += `\n${published.note}\n`;
 
     // Что именно мешает назвать ран успешным — решает failureForOutcome: агент мог не
@@ -647,6 +679,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       logUrl,
       outputTruncated: outcome.outputTruncated || logTruncated,
       failure: failureForOutcome(outcome.exitReason, collected.missing, publicationFailure),
+      ...(published.profileChanges ? { profileChanges: published.profileChanges } : {}),
     });
     await report(reportUrl, claim.reportToken, result);
     return outcome.exitReason === 'completed' ? RUNNER_EXIT.ok : RUNNER_EXIT.agentFailed;

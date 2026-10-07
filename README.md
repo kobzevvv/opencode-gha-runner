@@ -19,22 +19,26 @@
 GitHub Actions: .github/workflows/run-agent.yml
   │  POST /v1/claim             Authorization: Bearer <claim_token>
   ▼  ← получает { spec, llmKey, reportToken }
-создаёт per-run Unix-идентичность → клонирует repository.fullName
+создаёт per-run Unix-идентичность → обычный run клонирует repository.fullName;
+                            → profile run загружает подписанный API snapshot
   → opencode run "<промпт>" под этой идентичностью, только с разрешённым env
-  → артефакты коммитом в repository.fullName, лог в GCS
+  → обычный run публикует выходы через GitHub; profile run отправляет saveback API;
+  → лог в GCS
   │  POST /v1/runs/{runId}/result
   ▼
 наш API: GET /v1/runs/{runId} → LaunchResult
 ```
 
-Для постоянного профиля API передаёт закреплённый `repository.revision` и
-`profileWorkspace` с проверенными ref тяжёлых файлов. Воркер проверяет checkout этого
-commit, материализует объекты из приватного `GCS_PROFILE_BUCKET` с SHA-256, затем сохраняет
-разрешённые изменения файлов, новые файлы, удаления и объявленные `outputs` в ветку
-`agent-run/<runId>`. Файл свыше 1 MiB уходит в GCS;
-`.trained-assist/artifacts.json` содержит его key, size и checksum. URL объекта не
-делается публичным: API отдаёт bytes по авторизованному маршруту artifacts. Правила
-исключения профиля применяются к новым файлам, даже если агент изменил `.gitignore`.
+Обычный repository-run клонирует закреплённый `repository.revision` и публикует выходы
+в `agent-run/<runId>`. Profile-run использует отдельный API-backed путь: API передаёт подписанный
+tar.gz snapshot с SHA-256 и одноразовую capability для записи только в этот run. Воркер
+проверяет архив и checksum файлов, не клонирует профиль через GitHub, последовательно
+загружает изменённые файлы в API и возвращает `profileChanges` только после успешной
+загрузки всего набора. API публикует изменения собственным host credential. GitHub
+publication token, профильный GCS bucket и GCS write identity этому пути не нужны.
+Локальные проверки, границы live-приёмки и reset/inspection шаги описаны в
+[`docs/PROFILE-SAVEBACK-TESTING.md`](docs/PROFILE-SAVEBACK-TESTING.md).
+Правила исключения профиля применяются даже если агент меняет `.gitignore`.
 
 ## Почему ключ LLM не едет в `workflow_dispatch`
 

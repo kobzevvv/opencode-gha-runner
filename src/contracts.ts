@@ -93,7 +93,7 @@ export interface LaunchRequest {
   ownerGeneration: number;
   engine: EngineSpec;
   input: { inlinePrompt: string };
-  /** Абсолютный путь workspace внутри раннера (см. DEVIATIONS: воркер клонирует сам). */
+  /** Абсолютный путь workspace внутри раннера; profile runs materialize the API snapshot here. */
   cwd: string;
   envAllowlist: string[];
   env: Record<string, string>;
@@ -106,12 +106,20 @@ export interface LaunchRequest {
   repository: { fullName: string; branch: string; revision?: string };
   profileWorkspace?: {
     bindingId: string;
+    /** API-generated, short-lived signed URL for this run's profile snapshot archive. */
+    snapshotUrl: string;
+    snapshotSha256: string;
+    snapshotSize: number;
+    /** API endpoint accepting raw changed-file bytes with this run-scoped bearer. */
+    savebackUrl: string;
+    savebackToken: string;
     objectBucket?: string;
     artifacts: Array<{ path: string; key: string; sha256: string; size: number }>;
     excludedPatterns: string[];
   };
   /**
-   * Токен публикации: клон `repository.fullName` и коммит выходов в его ветку.
+   * Токен публикации для обычного (не profile) запуска: клон `repository.fullName`
+   * и коммит выходов в его ветку. Profile runs must use the API saveback capability instead.
    *
    * Зачем он в запросе, а не только в `ARTIFACTS_TOKEN` репозитория кольца: джоба
    * запускается в чужом репозитории (кольцо), и токен этого репозитория по построению
@@ -215,6 +223,8 @@ export interface LaunchResult {
    * «коммита нет», а не выдуманный хэш.
    */
   repo: { fullName: string; branch: string; commit: string; baseRef?: string };
+  /** Files uploaded to the API's run-scoped profile saveback endpoint. */
+  profileChanges?: { files: Array<{ path: string; sha256: string; size: number }>; deletes: string[] };
   failure?: Failure;
 }
 
@@ -242,6 +252,7 @@ export const FAILURE_CODES = [
   'ARTIFACTS_PUSH_FAILED',
   // Токена публикации не пришло: клон и коммит нечем делать. Префлайт, агент не идёт.
   'ARTIFACTS_TOKEN_UNSET',
+  'PROFILE_SNAPSHOT_INVALID',
 ] as const;
 
 export type FailureCode = (typeof FAILURE_CODES)[number];
@@ -499,6 +510,11 @@ export function validateLaunchRequest(input: unknown): LaunchRequest {
     if (!isPlainObject(profile) || typeof profile['bindingId'] !== 'string' || !Array.isArray(profile['artifacts']) || !Array.isArray(profile['excludedPatterns'])) {
       issues.push('profileWorkspace: expected bindingId, artifacts and excludedPatterns');
     } else {
+      if (typeof profile['snapshotUrl'] !== 'string' || !/^https:\/\//.test(profile['snapshotUrl'])) issues.push('profileWorkspace.snapshotUrl: expected an HTTPS URL');
+      if (typeof profile['snapshotSha256'] !== 'string' || !/^[0-9a-f]{64}$/.test(profile['snapshotSha256'])) issues.push('profileWorkspace.snapshotSha256: expected a SHA-256 digest');
+      if (!Number.isSafeInteger(profile['snapshotSize']) || Number(profile['snapshotSize']) < 0 || Number(profile['snapshotSize']) > 512 * 1024 * 1024) issues.push('profileWorkspace.snapshotSize: invalid size');
+      if (typeof profile['savebackUrl'] !== 'string' || !/^https:\/\//.test(profile['savebackUrl'])) issues.push('profileWorkspace.savebackUrl: expected an HTTPS URL');
+      if (typeof profile['savebackToken'] !== 'string' || profile['savebackToken'].length < 32 || profile['savebackToken'].length > 500) issues.push('profileWorkspace.savebackToken: invalid run-scoped capability');
       for (const [index, pattern] of profile['excludedPatterns'].entries()) {
         if (typeof pattern !== 'string' || pattern.length > 500) issues.push(`profileWorkspace.excludedPatterns[${index}]: invalid pattern`);
         else try { new RegExp(pattern); } catch { issues.push(`profileWorkspace.excludedPatterns[${index}]: invalid regex`); }
@@ -522,6 +538,9 @@ export function validateLaunchRequest(input: unknown): LaunchRequest {
     } else if (req['publicationToken'].length > 500) {
       issues.push('publicationToken: longer than 500');
     }
+  }
+  if (req['profileWorkspace'] !== undefined && req['publicationToken'] !== undefined) {
+    issues.push('publicationToken: forbidden for profile runs; API owns profile publication');
   }
 
   // Адрес возврата результата. Без него воркеру некуда отдать LaunchResult, и наш API

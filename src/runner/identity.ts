@@ -279,7 +279,10 @@ export function runUnderIdentity(
 ): Promise<CommandResult> {
   const launch = buildLaunchCommand({ identity, binary: command, argv, env });
   return new Promise<CommandResult>((resolve, reject) => {
-    const child = spawn(launch.command, launch.argv, {
+    // Node's child lookup of `env` can use the parent PATH even when the child's
+    // environment is explicitly sanitized; pin the ubiquitous Unix executable.
+    const executable = launch.command === 'env' ? '/usr/bin/env' : launch.command;
+    const child = spawn(executable, launch.argv, {
       cwd: identity.workspace,
       env: { PATH: MINIMAL_PATH },
       stdio: ['ignore', 'pipe', 'pipe'],

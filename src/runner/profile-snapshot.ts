@@ -110,6 +110,11 @@ export async function materializeProfileSnapshot(
     await runUnderIdentity(identity, 'tar', [
       '-xzf', archive, '-C', workspace, '--no-same-owner', '--no-same-permissions',
     ], { PATH: process.env['PATH'] ?? '/usr/bin:/bin' });
+    // Archives made from a private temporary source directory can include a `./`
+    // entry with mode 0700. Restore the host-created workspace mode before spawning
+    // another helper with `cwd: workspace`; otherwise Node cannot start even sudo.
+    if (identity.enforced) await exec('sudo', ['chmod', '0755', workspace]);
+    else await chmod(workspace, 0o750);
     await runUnderIdentity(identity, 'rm', ['-f', archive], { PATH: process.env['PATH'] ?? '/usr/bin:/bin' });
 
     // Ensure the extracted tree contains only regular files/directories and no links escaped.

@@ -148,7 +148,15 @@ export async function materializeProfileSnapshot(
     };
     // Keep the workspace root mode restored above: the host supervisor traverses it
     // after the per-run identity exits. Only imported descendants are normalized here.
-    await makeRunWritable(root);
+    if (identity.enforced) {
+      // The host runner is not the owner of the extracted tree; use its passwordless
+      // sudo capability to normalize modes without changing the run UID ownership.
+      await exec('sudo', ['find', root, '-type', 'd', '-exec', 'chmod', '0700', '{}', '+']);
+      await exec('sudo', ['find', root, '-type', 'f', '-exec', 'chmod', '0600', '{}', '+']);
+      await exec('sudo', ['chmod', '0755', workspace]);
+    } else {
+      await makeRunWritable(root);
+    }
 
     for (const artifact of profile.artifacts) {
       const absolute = path.resolve(workspace, artifact.path);

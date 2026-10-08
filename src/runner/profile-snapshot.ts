@@ -132,8 +132,8 @@ export async function materializeProfileSnapshot(
     };
     await walk(root);
     // Repository snapshots preserve read-only Git modes (for example 0444). The
-    // agent must be able to edit these files for read/append tasks and saveback.
-    // Keep the imported tree private to the per-run identity while making it writable.
+    // agent must be able to edit these files, while the trusted runner group needs
+    // read access later to checksum and upload changes. Other users stay excluded.
     const makeRunWritable = async (directory: string): Promise<void> => {
       for (const entry of await readdir(directory, { withFileTypes: true })) {
         const absolute = path.join(directory, entry.name);
@@ -150,10 +150,13 @@ export async function materializeProfileSnapshot(
     // after the per-run identity exits. Only imported descendants are normalized here.
     if (identity.enforced) {
       // The host runner is not the owner of the extracted tree; use its passwordless
-      // sudo capability to normalize modes without changing the run UID ownership.
-      await exec('sudo', ['find', root, '-type', 'd', '-exec', 'chmod', '0700', '{}', '+']);
-      await exec('sudo', ['find', root, '-type', 'f', '-exec', 'chmod', '0600', '{}', '+']);
-      await exec('sudo', ['chmod', '0755', workspace]);
+      // sudo capability to set its group on the validated tree without changing the
+      // run UID owner. The agent's private primary group cannot read these files.
+      const trustedGid = String(process.getgid?.() ?? identity.gid);
+      await exec('sudo', ['find', root, '-type', 'd', '-exec', 'chgrp', trustedGid, '{}', '+']);
+      await exec('sudo', ['find', root, '-type', 'f', '-exec', 'chgrp', trustedGid, '{}', '+']);
+      await exec('sudo', ['find', root, '-type', 'd', '-exec', 'chmod', '0750', '{}', '+']);
+      await exec('sudo', ['find', root, '-type', 'f', '-exec', 'chmod', '0640', '{}', '+']);
     } else {
       await makeRunWritable(root);
     }

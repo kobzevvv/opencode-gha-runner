@@ -146,9 +146,8 @@ export async function materializeProfileSnapshot(
         }
       }
     };
-    // The host supervisor still traverses the workspace after the agent exits.
-    // Preserve the host-accessible workspace root while keeping imported content private.
-    await chmod(root, identity.enforced ? 0o755 : 0o750);
+    // Keep the workspace root mode restored above: the host supervisor traverses it
+    // after the per-run identity exits. Only imported descendants are normalized here.
     await makeRunWritable(root);
 
     for (const artifact of profile.artifacts) {

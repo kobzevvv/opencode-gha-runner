@@ -24,5 +24,21 @@ GITHUB_WORKFLOW = "run-agent.yml"
 PUBLIC_BASE_URL = "https://opencode-gha-runner-gateway.skillset-apply.workers.dev"
 AGENT_BINARY = "opencode"
 
+# Изолированный компонентный sandbox. Не подключён к Telegram или Agent API.
+[env.sandbox]
+name = "opencode-gha-runner-gateway-sandbox"
+workers_dev = true
+
+[[env.sandbox.kv_namespaces]]
+binding = "RUNS"
+id = "136ea015f1384cd0a84e021dd1dc4902"
+
+[env.sandbox.vars]
+GITHUB_REPO = "kobzevvv/opencode-gha-runner"
+GITHUB_WORKFLOW = "run-agent.yml"
+GITHUB_REF = "fix/profile-snapshot-write-permissions-20261008"
+PUBLIC_BASE_URL = "https://opencode-gha-runner-gateway-sandbox.skillset-apply.workers.dev"
+AGENT_BINARY = "opencode"
+
 [observability]
 enabled = true

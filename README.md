@@ -1,5 +1,17 @@
 # opencode-gha-runner
 
+## Isolated gateway component sandbox
+
+`npm run deploy:sandbox` deploys `opencode-gha-runner-gateway-sandbox` with a
+dedicated KV namespace. It targets the public test workflow repository and is not
+connected to Telegram or the Agent API. Set a sandbox-only `WORKER_TOKEN` using
+Wrangler secrets before running the live status probe. The probe's synthetic KV
+record is removed when it completes.
+
+Run `npm run smoke:sandbox-status -- <completed-github-actions-run-id>` to verify
+that a completed pre-claim workflow failure is surfaced as a failed run. This is a
+gateway component probe, not full Agent API/profile end-to-end acceptance.
+
 Внешний воркер Serverless Agent API: принимает `POST /v1/launch`, поднимает одноразовую
 джобу в GitHub Actions, запускает в ней агента opencode и возвращает результат в формате
 `LaunchResult`.

@@ -14,6 +14,8 @@
     "test": "npm run build && node --test dist/test/*.test.js",
     "smoke": "npm run build && node dist/scripts/smoke.js",
     "deploy": "wrangler deploy",
+    "deploy:sandbox": "wrangler deploy --env sandbox",
+    "smoke:sandbox-status": "node scripts/sandbox-status-reconcile.mjs",
     "deploy:dry": "wrangler deploy --dry-run",
     "verify": "npm run typecheck && npm test && npm run smoke"
   },

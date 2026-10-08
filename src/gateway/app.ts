@@ -71,6 +71,8 @@ export interface GatewayDeps {
   fetchImpl?: typeof fetch;
   /** Генератор токенов — подменяется в тестах на детерминированный. */
   randomToken?: () => string;
+  /** Минимальная пауза между сверками GHA статуса непринятого workflow. */
+  workflowStatusRefreshMs?: number;
   /** Логирование. По умолчанию ничего не печатает: тело запроса содержит `llmKey`. */
   log?: (message: string, fields?: Record<string, unknown>) => void;
   now?: () => number;
@@ -119,6 +121,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
   const { config, store } = deps;
   const randomToken = deps.randomToken ?? defaultRandomToken;
   const now = deps.now ?? (() => Date.now());
+  const workflowStatusRefreshMs = deps.workflowStatusRefreshMs ?? 30_000;
   const log = deps.log ?? ((): void => {});
   // Клиент строится под цель: у каждого репозитория кольца свой токен и своя история
   // прогонов. Кэш по ключу «репозиторий+токен» — чтобы не пересобирать на каждый запрос.
@@ -404,14 +407,81 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     }
   }
 
+  /**
+   * A workflow may fail before the runner claims its one-time token (for example,
+   * during cloud authentication). In that case no job can later execute this run,
+   * so the gateway can safely turn GitHub's terminal failure into the worker result.
+   * Once claimed, only the runner may report the result: a failed Actions job could
+   * have lost its report after the agent already performed work.
+   */
+  async function reconcileUnclaimedWorkflow(run: StoredRun): Promise<void> {
+    if (run.phase !== 'dispatched' || run.githubRunId === null) return;
+    if (now() - run.updatedAt < workflowStatusRefreshMs) return;
+
+    let workflow: { status: string; conclusion: string | null } | null;
+    try {
+      workflow = await clientFor(run.target).getWorkflowRunState(run.githubRunId);
+    } catch (cause) {
+      log('workflow status check failed', {
+        runId: run.runId,
+        error: redact(cause instanceof Error ? cause.message : String(cause)),
+      });
+      await store.patch(run.runId, {});
+      return;
+    }
+    // Throttle checks even if GitHub has not indexed the run or reports it missing.
+    await store.patch(run.runId, {});
+    if (!workflow || workflow.status !== 'completed' || !workflow.conclusion || workflow.conclusion === 'success') return;
+
+    // Do not overwrite a claim/result that arrived while GitHub was being queried.
+    const current = await store.get(run.runId);
+    if (!current || current.phase !== 'dispatched') return;
+
+    const cancelled = workflow.conclusion === 'cancelled';
+    const result: LaunchResult = {
+      runId: run.runId,
+      status: 'failed',
+      pid: null,
+      exitCode: null,
+      exitSignal: null,
+      exitReason: cancelled ? 'cancelled' : 'startup_failure',
+      stdout: '',
+      stderr: `GitHub Actions workflow concluded ${workflow.conclusion} before the runner claimed this run`,
+      answerSource: null,
+      durationMs: Math.max(0, now() - run.createdAt),
+      timedOut: workflow.conclusion === 'timed_out',
+      outputTruncated: false,
+      artifacts: [],
+      logUrl: `https://github.com/${run.target.repo}/actions/runs/${run.githubRunId}`,
+      repo: {
+        fullName: run.request.repository.fullName,
+        branch: run.request.repository.branch,
+        commit: '0'.repeat(40),
+      },
+      ...(cancelled ? {} : {
+        failure: failure(
+          'WORKER_INTERNAL',
+          'engine',
+          `GitHub Actions workflow concluded ${workflow.conclusion} before the runner claimed this run`,
+        ),
+      }),
+    };
+    const accepted = await store.complete(run.runId, run.reportToken, result);
+    if (!accepted) return;
+    log('unclaimed workflow completed', { runId: run.runId, conclusion: workflow.conclusion });
+    await deliverToApi(run.request.resultUrl, result);
+  }
+
   /** `GET /v1/runs/{runId}/status` — контрактный статус, без результата. */
   async function handleRunStatus(runId: string): Promise<Response> {
-    const run = await store.get(runId);
+    let run = await store.get(runId);
     // Неизвестный ран — это `unknown`, а не 404: исход установить нельзя, и наш API
     // должен пойти в reconcile, а не решить, что запуска не было.
     if (!run) {
       return json({ runId, status: 'unknown', updatedAt: new Date(now()).toISOString() }, 200, noStore());
     }
+    await reconcileUnclaimedWorkflow(run);
+    run = await store.get(runId) ?? run;
     return json(
       { runId, status: workerStatus(run), updatedAt: new Date(run.updatedAt).toISOString() },
       200,

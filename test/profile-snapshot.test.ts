@@ -55,7 +55,8 @@ test('profile snapshot accepts tar root entries and makes read-only repository f
     await materializeProfileSnapshot(spec, workspace, identity, async () => new Response(snapshot));
     assert.equal(await readFile(path.join(workspace, 'notes/state.txt'), 'utf8'), 'before');
     assert.equal((await stat(workspace)).mode & 0o777, 0o750, 'archive root metadata must not make the run workspace inaccessible to its host');
-    assert.equal((await stat(path.join(workspace, 'notes/state.txt'))).mode & 0o222, 0o200, 'read-only repository files must be writable by the run identity');
+    assert.equal((await stat(path.join(workspace, 'notes/state.txt'))).mode & 0o777, 0o600, 'unenforced local snapshots stay private to the run identity');
+    assert.equal((await stat(path.join(workspace, 'notes'))).mode & 0o777, 0o700, 'unenforced local snapshot directories stay private to the run identity');
     assert.equal((await readdir(workspace)).some((name) => name.startsWith('.profile-snapshot-')), false, 'private snapshot archive is removed before agent launch');
     execFileSync('git', ['-C', workspace, 'status', '--porcelain']);
 

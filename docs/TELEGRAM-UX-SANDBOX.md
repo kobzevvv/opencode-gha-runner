@@ -1,4 +1,23 @@
-# CP Telegram UX Runner sandbox
+# Isolated GHA executor sandbox for CP Telegram UX tests
+
+This is an internal executor behind the existing Runner API. It is **not** a
+Telegram endpoint and Control Plane must not call this Worker directly. The
+request path stays:
+
+```text
+Telegram → Control Plane → ai-agent-runner Serverless API
+          → this GHA gateway → private GitHub Actions workflow
+```
+
+The endpoint settings belong at different boundaries:
+
+- CP `RUNNER_API_URL` points to the `ai-agent-runner` Serverless API.
+- Runner API `EXTERNAL_WORKER_URL` points to this Worker; its
+  `EXTERNAL_WORKER_TOKEN` matches this Worker's `WORKER_TOKEN`.
+- The private Actions repository's `GATEWAY_URL` points back to this Worker so
+  the job can claim its run and report the result. It is not the CP API URL.
+- CP's `RUNNER_API_KEY_TELEGRAM_UX` authenticates CP to the Runner API. It is a
+  separate credential and must not be reused as the gateway token.
 
 This configuration is for a separate Cloudflare Worker and a dedicated KV
 namespace. It must not be replaced with the primary `wrangler.toml`: that worker
@@ -6,11 +25,11 @@ already serves the main API.
 
 ## Resources
 
-- Worker: `opencode-gha-runner-telegram-ux-sandbox`
+- Internal GHA gateway Worker: `opencode-gha-runner-telegram-ux-sandbox`
 - KV binding `RUNS`: `ef2ef198077946ac8a8dc0721aff4e08`
 - Public base URL: `https://opencode-gha-runner-telegram-ux-sandbox.skillset-apply.workers.dev`
 - Private Actions repository: `vovalikessmoothy-png/opencode-gha-runner-telegram-ux-sandbox`
-- Private task/output fixture: `vovalikessmoothy-png/cp-telegram-ux-runner-sandbox`
+- Optional private task/output fixture: `vovalikessmoothy-png/cp-telegram-ux-runner-sandbox`
 - Wrangler config: `wrangler.telegram-ux-sandbox.toml`
 
 The KV namespace was created in the trained-assist Cloudflare test account on
@@ -36,11 +55,17 @@ Keep `RING_TARGETS` unset so this sandbox uses the single private execution repo
 configured in `[vars]`.
 
 The private GHA workflow repository has sandbox-only `GATEWAY_URL` and
-`LOG_UPLOAD=local` variables. Its `ARTIFACTS_TOKEN` must be a fine-grained token
-limited to the private task/output fixture above; do not copy the primary workflow
-repo's publication secret or point at production artifacts/profile data. The gateway
-`GITHUB_TOKEN` must be separately limited to Actions read/write on the private
-workflow repository. Do not grant either token access to unrelated repositories.
+`LOG_UPLOAD=local` variables. For this profile saveback scenario, do **not** create
+an `ARTIFACTS_TOKEN`: `profileWorkspace` runs download their signed snapshot and
+upload changes through the Runner API's one-run saveback capability. They bypass
+the normal GitHub clone/publish path, so no Contents token for the optional fixture
+repository is needed. Keep the Actions secret unset.
+
+The gateway still needs a `GITHUB_TOKEN` limited to Actions read/write on the
+private workflow repository so it can dispatch, inspect, and cancel jobs. Do not
+grant it access to unrelated repositories or copy the primary gateway token.
+Ordinary non-profile runs that publish outputs to another GitHub repository use a
+separate publication credential; that flow is outside this profile acceptance.
 
 ## Deploy after credentials and API sandbox exist
 

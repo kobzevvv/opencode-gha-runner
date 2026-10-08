@@ -362,8 +362,11 @@ queued», а при параллельных запусках это мог бы
 | `GCS_WORKLOAD_PROVIDER`, `GCS_SERVICE_ACCOUNT` (variables) | Actions → Variables | WIF identity для `gcloud storage`; workflow выдаёт `id-token: write` и ставит Cloud SDK |
 | `AGENT_ARGS` (variable) | Actions → Variables | доп. флаги агенту, например `-m ladder/free` |
 
-`GITHUB_TOKEN` джобы для этого не годится: он ограничен одним репозиторием, а артефакты
-кладутся в репозиторий пользователя.
+`GITHUB_TOKEN` джобы для обычной публикации артефактов не годится: он ограничен
+репозиторием workflow, а артефакты могут быть в другом репозитории пользователя.
+Исключение — profile saveback: такие запуски не клонируют GitHub-репозиторий и не
+публикуют результаты обычным способом. Они загружают подписанный snapshot и отправляют
+изменения через одноразовую saveback capability Runner API; `ARTIFACTS_TOKEN` им не нужен.
 
 ## Развёрнутый шлюз
 

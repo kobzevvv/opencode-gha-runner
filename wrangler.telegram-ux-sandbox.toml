@@ -1,0 +1,21 @@
+name = "opencode-gha-runner-telegram-ux-sandbox"
+main = "dist/src/worker.js"
+compatibility_date = "2024-12-30"
+workers_dev = true
+
+# This KV namespace is dedicated to the CP Telegram UX sandbox. Do not reuse the
+# primary gateway's RUNS namespace; the binding ID is filled after creation.
+[[kv_namespaces]]
+binding = "RUNS"
+id = "ef2ef198077946ac8a8dc0721aff4e08"
+
+# Secret values are provisioned separately and never committed:
+# WORKER_TOKEN, WORKER_TOKEN_TELEGRAM_UX, GITHUB_TOKEN, RING_TARGETS
+[vars]
+GITHUB_REPO = "vovalikessmoothy-png/opencode-gha-runner"
+GITHUB_WORKFLOW = "run-agent.yml"
+PUBLIC_BASE_URL = "https://opencode-gha-runner-telegram-ux-sandbox.skillset-apply.workers.dev"
+AGENT_BINARY = "opencode"
+
+[observability]
+enabled = true

@@ -30,14 +30,14 @@ test('staged profile archive is owned by the run identity and unreadable by othe
   }
 });
 
-test('profile snapshot accepts tar root entries, verifies checksum, and extracts as a git baseline', async () => {
+test('profile snapshot accepts tar root entries and makes read-only repository files editable by the run identity', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'profile-snapshot-'));
   try {
     const source = path.join(root, 'source');
     const workspace = path.join(root, 'workspace');
     await mkdir(path.join(source, 'notes'), { recursive: true });
     const before = Buffer.from('before');
-    await writeFile(path.join(source, 'notes/state.txt'), before);
+    await writeFile(path.join(source, 'notes/state.txt'), before, { mode: 0o444 });
     // API snapshots can carry a restrictive mode from their temporary root directory.
     await chmod(source, 0o700);
     const archive = path.join(root, 'snapshot.tar.gz');
@@ -55,6 +55,7 @@ test('profile snapshot accepts tar root entries, verifies checksum, and extracts
     await materializeProfileSnapshot(spec, workspace, identity, async () => new Response(snapshot));
     assert.equal(await readFile(path.join(workspace, 'notes/state.txt'), 'utf8'), 'before');
     assert.equal((await stat(workspace)).mode & 0o777, 0o750, 'archive root metadata must not make the run workspace inaccessible to its host');
+    assert.equal((await stat(path.join(workspace, 'notes/state.txt'))).mode & 0o222, 0o200, 'read-only repository files must be writable by the run identity');
     assert.equal((await readdir(workspace)).some((name) => name.startsWith('.profile-snapshot-')), false, 'private snapshot archive is removed before agent launch');
     execFileSync('git', ['-C', workspace, 'status', '--porcelain']);
 

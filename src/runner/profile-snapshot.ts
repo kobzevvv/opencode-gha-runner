@@ -131,6 +131,25 @@ export async function materializeProfileSnapshot(
       }
     };
     await walk(root);
+    // Repository snapshots preserve read-only Git modes (for example 0444). The
+    // agent must be able to edit these files for read/append tasks and saveback.
+    // Keep the imported tree private to the per-run identity while making it writable.
+    const makeRunWritable = async (directory: string): Promise<void> => {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const absolute = path.join(directory, entry.name);
+        const stat = await lstat(absolute);
+        if (stat.isDirectory()) {
+          await chmod(absolute, 0o700);
+          await makeRunWritable(absolute);
+        } else {
+          await chmod(absolute, 0o600);
+        }
+      }
+    };
+    // The host supervisor still traverses the workspace after the agent exits.
+    // Preserve the host-accessible workspace root while keeping imported content private.
+    await chmod(root, identity.enforced ? 0o755 : 0o750);
+    await makeRunWritable(root);
 
     for (const artifact of profile.artifacts) {
       const absolute = path.resolve(workspace, artifact.path);

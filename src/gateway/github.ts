@@ -66,6 +66,11 @@ export interface WorkflowRunSummary {
   createdAtMs: number | null;
 }
 
+export interface WorkflowRunState {
+  status: string;
+  conclusion: string | null;
+}
+
 export class GitHubClient {
   private readonly token: string;
   private readonly repo: string;
@@ -198,6 +203,22 @@ export class GitHubClient {
       .filter((run) => head.length === 0 || run.headSha === head)
       .sort((a, b) => (b.createdAtMs ?? 0) - (a.createdAtMs ?? 0));
     return candidates[0] ?? null;
+  }
+
+  /** Current state of the exact workflow run previously adopted by this gateway. */
+  async getWorkflowRunState(runId: number): Promise<WorkflowRunState | null> {
+    const { status, data } = await this.request<{ status?: unknown; conclusion?: unknown }>(
+      'GET',
+      `/repos/${this.repo}/actions/runs/${runId}`,
+    );
+    if (status === 404) return null;
+    if (status !== 200 || typeof data?.status !== 'string') {
+      throw new Error(`could not read GitHub Actions run ${runId} (HTTP ${status})`);
+    }
+    return {
+      status: data.status,
+      conclusion: typeof data.conclusion === 'string' ? data.conclusion : null,
+    };
   }
 
   private async headSha(branch: string): Promise<string> {

@@ -29,6 +29,7 @@ interface Harness {
   store: MemoryRunStore;
   dispatched: Array<{ runId: string; claimToken: string }>;
   cancelled: number[];
+  workflowStatusLookups: number[];
   /** Что шлюз переслал нашему API на `resultUrl`. */
   delivered: Array<{ url: string; auth: string | null; body: unknown }>;
 }
@@ -38,11 +39,14 @@ function harness(options: {
   dispatchFails?: 'rejected' | 'ambiguous';
   /** Что вернёт `findRunSince` при неоднозначном отказе. `null` — прогона не появилось. */
   runAppeared?: { id: number } | null;
+  workflowState?: { status: string; conclusion: string | null } | null;
+  workflowStatusRefreshMs?: number;
   deliveryStatus?: number;
 } = {}): Harness {
   const store = new MemoryRunStore();
   const dispatched: Array<{ runId: string; claimToken: string }> = [];
   const cancelled: number[] = [];
+  const workflowStatusLookups: number[] = [];
   const delivered: Array<{ url: string; auth: string | null; body: unknown }> = [];
   let counter = 0;
   let findRunSinceCalls = 0;
@@ -66,12 +70,19 @@ function harness(options: {
       cancelled.push(runId);
       return { cancelled: true, reason: 'cancelled' as const };
     },
+    getWorkflowRunState: async (runId: number) => {
+      workflowStatusLookups.push(runId);
+      return options.workflowState === undefined
+        ? { status: 'in_progress', conclusion: null }
+        : options.workflowState;
+    },
   } as unknown as GitHubClient;
 
   const app = createGateway({
     config,
     store,
     github,
+    workflowStatusRefreshMs: options.workflowStatusRefreshMs ?? 0,
     randomToken: () => {
       counter += 1;
       return `token-${counter}`;
@@ -87,7 +98,7 @@ function harness(options: {
     }) as unknown as typeof fetch,
   });
 
-  return { fetch: app.fetch, store, dispatched, cancelled, delivered };
+  return { fetch: app.fetch, store, dispatched, cancelled, workflowStatusLookups, delivered };
 }
 
 const spec = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -333,6 +344,33 @@ test('status завершённого рана — succeeded', async () => {
   await finish(h);
   const body = (await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as Record<string, unknown>;
   assert.equal(body['status'], 'succeeded');
+});
+
+test('status closes a failed GitHub workflow that never claimed the run', async () => {
+  const h = harness({ workflowState: { status: 'completed', conclusion: 'failure' } });
+  await h.fetch(launch(spec()));
+
+  const status = (await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as Record<string, unknown>;
+  assert.equal(status['status'], 'failed');
+  assert.deepEqual(h.workflowStatusLookups, [4242]);
+
+  const result = (await (await h.fetch(get(`/v1/runs/${RUN_ID}/result`))).json()) as Record<string, unknown>;
+  assert.equal(result['exitReason'], 'startup_failure');
+  assert.equal((result['failure'] as { code: string }).code, 'WORKER_INTERNAL');
+  assert.equal(h.delivered.length, 1);
+  assert.equal((h.delivered[0]!.body as { status: string }).status, 'failed');
+  assert.equal((await h.store.get(RUN_ID))?.phase, 'done');
+});
+
+test('a completed GHA failure does not replace the result after the runner claimed', async () => {
+  const h = harness({ workflowState: { status: 'completed', conclusion: 'failure' } });
+  await h.fetch(launch(spec()));
+  await h.fetch(post('/v1/claim', { runId: RUN_ID }, h.dispatched[0]!.claimToken));
+
+  const status = (await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as Record<string, unknown>;
+  assert.equal(status['status'], 'running');
+  assert.deepEqual(h.workflowStatusLookups, []);
+  assert.equal(h.delivered.length, 0);
 });
 
 test('status неизвестного рана — unknown, а не 404: наш API идёт в reconcile', async () => {

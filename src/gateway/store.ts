@@ -16,6 +16,8 @@ import type { LaunchRequest, LaunchResult, RunPhase, WorkerRunStatus } from '../
 import type { RingTarget } from './ring.js';
 
 export interface StoredRun {
+  /** Credential class used by the API client that owns this run. */
+  credentialId?: 'primary' | 'telegram_ux';
   runId: string;
   /**
    * Ключ дедупликации запуска. Наш API повторяет доставку, и повтор с тем же

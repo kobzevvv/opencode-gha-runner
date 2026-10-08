@@ -10,6 +10,7 @@ import { KvRunStore, type KvLike } from './gateway/store.js';
 export interface Env {
   RUNS: KvLike;
   WORKER_TOKEN: string;
+  WORKER_TOKEN_TELEGRAM_UX?: string;
   GITHUB_TOKEN: string;
   GITHUB_REPO: string;
   GITHUB_WORKFLOW?: string;
@@ -31,6 +32,7 @@ export default {
     const app = createGateway({
       config: {
         workerToken: env.WORKER_TOKEN,
+        telegramUxWorkerToken: env.WORKER_TOKEN_TELEGRAM_UX,
         repo: env.GITHUB_REPO,
         workflow: env.GITHUB_WORKFLOW ?? 'run-agent.yml',
         ref: env.GITHUB_REF || undefined,

@@ -14,9 +14,11 @@ import { MemoryRunStore } from '../src/gateway/store.js';
 import { validLaunchRequest } from './contracts.test.js';
 
 const WORKER_TOKEN = 'worker-token-for-tests';
+const TELEGRAM_UX_TOKEN = 'telegram-ux-token-for-tests';
 const API_RESULT_URL = 'https://api.example/v1/worker/launches/run_x/result';
 const config: GatewayConfig = {
   workerToken: WORKER_TOKEN,
+  telegramUxWorkerToken: TELEGRAM_UX_TOKEN,
   repo: 'vovalikessmoothy-png/opencode-gha-runner',
   workflow: 'run-agent.yml',
   publicBaseUrl: 'https://worker.example',
@@ -169,6 +171,29 @@ test('launch без токена — 401', async () => {
   const h = harness();
   assert.equal((await h.fetch(launch(spec(), null))).status, 401);
   assert.equal(h.dispatched.length, 0);
+});
+
+test('дополнительный ключ изолирован по ранам и callback использует тот же ключ', async () => {
+  const h = harness();
+  const specA = spec({ runId: 'run_telegram_ux_01', operationId: 'op_telegram_ux_01' });
+  const accepted = await h.fetch(launch(specA, TELEGRAM_UX_TOKEN));
+  assert.equal(accepted.status, 202);
+  assert.equal((await h.store.get('run_telegram_ux_01'))?.credentialId, 'telegram_ux');
+
+  assert.equal((await h.fetch(get('/v1/runs/run_telegram_ux_01/status'))).status, 404);
+  assert.equal((await h.fetch(get('/v1/runs/run_telegram_ux_01/status', TELEGRAM_UX_TOKEN))).status, 200);
+  assert.equal((await h.fetch(post('/v1/runs/run_telegram_ux_01/cancel', {}, WORKER_TOKEN))).status, 404);
+  assert.equal((await h.fetch(launch({ ...specA, runId: 'run_conflict_0001' }, WORKER_TOKEN))).status, 409);
+
+  const runClaimToken = h.dispatched.at(-1)!.claimToken;
+  const claimResponse = await h.fetch(post('/v1/claim', { runId: 'run_telegram_ux_01' }, runClaimToken));
+  const claim = (await claimResponse.json()) as { reportToken: string };
+  await h.fetch(post('/v1/runs/run_telegram_ux_01/report', {
+    status: 'succeeded', exitCode: 0, exitSignal: null, exitReason: 'completed', stdout: '', stderr: '',
+    answerSource: 'engine_stdout', durationMs: 10, timedOut: false, outputTruncated: false, artifacts: [], logUrl: '',
+    repo: { fullName: 'owner/name', branch: 'main', commit: 'a'.repeat(40) },
+  }, claim.reportToken));
+  assert.equal(h.delivered.at(-1)?.auth, `Bearer ${TELEGRAM_UX_TOKEN}`);
 });
 
 test('launch с некорректным телом — 400 со списком проблем', async () => {

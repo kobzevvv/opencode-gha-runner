@@ -33,6 +33,8 @@ import { isTerminal, workerStatus, type KvLike, type RunStore, type StoredRun } 
 export interface GatewayConfig {
   /** Общий секрет между нашим API и воркером (`Authorization: Bearer`). */
   workerToken: string;
+  /** Optional isolated client credential for the Telegram UX sandbox. */
+  telegramUxWorkerToken?: string;
   /** Репозиторий с workflow: `owner/name`. */
   repo: string;
   /** Файл workflow, например `run-agent.yml`. */
@@ -187,15 +189,31 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     }
   }
 
-  function requireWorkerAuth(request: Request): Response | null {
+  function workerCredential(request: Request): 'primary' | 'telegram_ux' | null {
     const token = bearer(request);
-    if (!token || !timingSafeEqual(token, config.workerToken)) {
-      return json({ error: 'unauthorized' }, 401, noStore({ 'www-authenticate': 'Bearer' }));
-    }
+    if (!token) return null;
+    if (timingSafeEqual(token, config.workerToken)) return 'primary';
+    if (config.telegramUxWorkerToken && timingSafeEqual(token, config.telegramUxWorkerToken)) return 'telegram_ux';
     return null;
   }
 
-  async function handleLaunch(request: Request): Promise<Response> {
+  function requireWorkerAuth(request: Request): { credentialId: 'primary' | 'telegram_ux' } | Response {
+    const credentialId = workerCredential(request);
+    return credentialId
+      ? { credentialId }
+      : json({ error: 'unauthorized' }, 401, noStore({ 'www-authenticate': 'Bearer' }));
+  }
+
+  function credentialToken(credentialId: 'primary' | 'telegram_ux' | undefined): string {
+    return credentialId === 'telegram_ux' ? config.telegramUxWorkerToken! : config.workerToken;
+  }
+
+  function ownsRun(run: StoredRun, credentialId: 'primary' | 'telegram_ux'): boolean {
+    // Pre-existing KV records predate credential IDs and belong to the primary key.
+    return (run.credentialId ?? 'primary') === credentialId;
+  }
+
+  async function handleLaunch(request: Request, credentialId: 'primary' | 'telegram_ux'): Promise<Response> {
     const spec = validateLaunchRequest(await readJson(request));
 
     // Дедупликация по operationId, а не по runId: наш API повторяет доставку того же
@@ -204,6 +222,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     // ещё идёт, ровно тот дефект, который контракт исключает.
     const existing = await store.findByOperationId(spec.operationId);
     if (existing) {
+      if (!ownsRun(existing, credentialId)) return json({ error: 'operation_id_conflict' }, 409, noStore());
       log('launch deduplicated', { runId: existing.runId, operationId: spec.operationId, phase: existing.phase });
       return json(receipt(existing), 202, noStore());
     }
@@ -217,6 +236,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     const claimToken = randomToken();
     const reportToken = randomToken();
     await store.create({
+      credentialId,
       runId: spec.runId,
       operationId: spec.operationId,
       request: spec,
@@ -354,7 +374,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     const accepted = await store.complete(runId, token, result);
     log('run result accepted', { runId, accepted, exitReason: result.exitReason });
 
-    await deliverToApi(stored.request.resultUrl, result);
+    await deliverToApi(stored.request.resultUrl, result, stored.credentialId);
     return json({ runId, status: 'accepted', exitReason: result.exitReason }, 200, noStore());
   }
 
@@ -363,13 +383,13 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
    * результат уже лежит у нас, и API заберёт его опросом. Молча терять нельзя — поэтому
    * в лог уходит причина без тела результата.
    */
-  async function deliverToApi(resultUrl: string, result: LaunchResult): Promise<void> {
+  async function deliverToApi(resultUrl: string, result: LaunchResult, credentialId?: 'primary' | 'telegram_ux'): Promise<void> {
     const fetchImpl = deps.fetchImpl ?? fetch.bind(globalThis);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         const response = await fetchImpl(resultUrl, {
           method: 'POST',
-          headers: { authorization: `Bearer ${config.workerToken}`, 'content-type': 'application/json' },
+          headers: { authorization: `Bearer ${credentialToken(credentialId)}`, 'content-type': 'application/json' },
           body: JSON.stringify(result),
         });
         if (response.ok || response.status === 409) {
@@ -465,9 +485,9 @@ async function handleCancel(runId: string): Promise<Response> {
         }
 
         if (request.method === 'POST' && path === '/v1/launch') {
-          const denied = requireWorkerAuth(request);
-          if (denied) return denied;
-          return await handleLaunch(request);
+          const auth = requireWorkerAuth(request);
+          if (auth instanceof Response) return auth;
+          return await handleLaunch(request, auth.credentialId);
         }
 
         if (request.method === 'POST' && path === CLAIM_PATH) {
@@ -482,22 +502,28 @@ async function handleCancel(runId: string): Promise<Response> {
 
         if (request.method === 'POST' && /^\/v1\/runs\/[^/]+\/cancel$/.test(path)) {
           const runId = decodeURIComponent(path.split('/')[3]!);
-          const denied = requireWorkerAuth(request);
-          if (denied) return denied;
+          const auth = requireWorkerAuth(request);
+          if (auth instanceof Response) return auth;
+          const run = await store.get(runId);
+          if (run && !ownsRun(run, auth.credentialId)) return json({ error: 'not_found' }, 404, noStore());
           return await handleCancel(runId);
         }
 
         if (request.method === 'GET' && /^\/v1\/runs\/[^/]+\/status$/.test(path)) {
           const runId = decodeURIComponent(path.split('/')[3]!);
-          const denied = requireWorkerAuth(request);
-          if (denied) return denied;
+          const auth = requireWorkerAuth(request);
+          if (auth instanceof Response) return auth;
+          const run = await store.get(runId);
+          if (run && !ownsRun(run, auth.credentialId)) return json({ error: 'not_found' }, 404, noStore());
           return await handleRunStatus(runId);
         }
 
         if (request.method === 'GET' && /^\/v1\/runs\/[^/]+\/result$/.test(path)) {
           const runId = decodeURIComponent(path.split('/')[3]!);
-          const denied = requireWorkerAuth(request);
-          if (denied) return denied;
+          const auth = requireWorkerAuth(request);
+          if (auth instanceof Response) return auth;
+          const run = await store.get(runId);
+          if (run && !ownsRun(run, auth.credentialId)) return json({ error: 'not_found' }, 404, noStore());
           return await handleRunResult(runId);
         }
 

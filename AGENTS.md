@@ -34,6 +34,10 @@ credentials and runs. Sandbox3 reuses the native launcher through
 and log limits, a separate Unix identity, serialized jobs and a 10-minute job ceiling. A signed profile
 snapshot and run-scoped saveback capability are required before admission.
 This does not establish a filesystem quota or full Telegram acceptance.
+Profile object materialization/saveback uses the existing GCS_PROFILE_BUCKET
+and GCS_WORKLOAD_PROVIDER/GCS_SERVICE_ACCOUNT configuration. Only the trusted
+job receives WIF credentials; the isolated agent's environment does not receive
+them. Session logs remain local. Preserve other profiles and object prefixes.
 
 Deploy reviewed main using `deploy-sandbox3.yml` and environment
 `native-sandbox3`. Its CF_API_TOKEN, SANDBOX3_WORKER_TOKEN and

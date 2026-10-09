@@ -1,0 +1,36 @@
+name: Inspect existing sandbox3 profile storage access
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: native-sandbox3-storage-access
+  cancel-in-progress: false
+jobs:
+  inspect:
+    if: github.ref == 'refs/heads/main'
+    environment: native-sandbox3
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Authenticate using the existing profile storage identity
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCS_WORKLOAD_PROVIDER }}
+          service_account: ${{ vars.GCS_SERVICE_ACCOUNT }}
+          token_format: access_token
+      - name: Inspect existing bucket and service identity capabilities
+        env:
+          STORAGE_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          STORAGE_SERVICE_ACCOUNT: ${{ vars.GCS_SERVICE_ACCOUNT }}
+          STORAGE_BUCKET: ${{ vars.GCS_PROFILE_BUCKET }}
+          STORAGE_WORKLOAD_PROVIDER: ${{ vars.GCS_WORKLOAD_PROVIDER }}
+        run: node scripts/sandbox3-storage-access.mjs

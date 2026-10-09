@@ -580,8 +580,17 @@ test('sandbox3 defaults the accepted run to the free ladder and preserves same-o
   assert.equal((await h.fetch(launch(body))).status, 202);
   assert.equal(h.dispatched.length, 1);
   assert.equal((await h.store.get(RUN_ID))?.request.engine.modelSettings?.model, 'free');
+  assert.equal((await h.store.get(RUN_ID))?.request.isolation.mode, 'per_run_unix_identity');
   const health = await (await h.fetch(new Request('https://worker.example/healthz'))).json() as Record<string, unknown>;
   assert.equal(health.sandboxPolicy, 'free-only-v1');
+});
+test('sandbox3 enforces a separate agent identity when the caller requests no isolation', async () => {
+  const h = harness({ sandbox3FreeOnly: true });
+  const body = spec({ ...sandbox3Profile, isolation: { mode: 'none' },
+    limits: { timeoutMs: 180000, maxOutputBytes: 1024, maxLogBytes: 1024 } });
+  assert.equal((await h.fetch(launch(body))).status, 202);
+  assert.equal((await h.store.get(RUN_ID))?.request.isolation.mode, 'per_run_unix_identity');
+  assert.equal(h.dispatched.length, 1);
 });
 test('public source health reports a validated SHA without credentials', async () => {
   const h = harness({ buildSha: 'a'.repeat(40), sandbox3FreeOnly: true });

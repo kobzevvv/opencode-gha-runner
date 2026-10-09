@@ -31,7 +31,7 @@ Public health and local mocks are not full Telegram acceptance evidence.
 for `integration-sandbox3-v1`. Preserve the existing component gateway, its ref,
 credentials and runs. Sandbox3 reuses the native launcher through
 `run-agent-sandbox3.yml`: free ladder only, 180-second agent limit, 1 MiB output
-and log limits, serialized jobs and a 10-minute job ceiling. A signed profile
+and log limits, a separate Unix identity, serialized jobs and a 10-minute job ceiling. A signed profile
 snapshot and run-scoped saveback capability are required before admission.
 This does not establish a filesystem quota or full Telegram acceptance.
 

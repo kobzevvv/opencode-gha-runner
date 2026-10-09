@@ -232,6 +232,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
         return json({ error: 'sandbox_limits_exceeded' }, 400, noStore());
       }
       spec.engine = { ...spec.engine, modelSettings: { model: 'free' } };
+      spec.isolation = { mode: 'per_run_unix_identity' };
     }
 
     // Дедупликация по operationId, а не по runId: наш API повторяет доставку того же

@@ -1,0 +1,53 @@
+name: Deploy Native sandbox3 gateway
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: native-sandbox3-deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    environment: native-sandbox3
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci && npm run verify
+      - name: Pin the native workflow source to an immutable sandbox branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          runtime_ref="runtime/sandbox3/${GITHUB_SHA}"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$runtime_ref" > "$RUNNER_TEMP/runtime-ref.json" 2>/dev/null; then
+            EXPECTED_SHA="$GITHUB_SHA" node -e 'const fs=require("fs");if(JSON.parse(fs.readFileSync(process.argv[1])).object.sha!==process.env.EXPECTED_SHA)process.exit(1)' "$RUNNER_TEMP/runtime-ref.json"
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/heads/$runtime_ref" -f "sha=$GITHUB_SHA" > /dev/null
+          fi
+          echo "SANDBOX3_RUNTIME_REF=$runtime_ref" >> "$GITHUB_ENV"
+      - name: Verify account and deploy the fixed sandbox gateway
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: d740a05e9442c1d0feacae2dfc673e93
+          SANDBOX3_WORKER_TOKEN: ${{ secrets.SANDBOX3_WORKER_TOKEN }}
+          SANDBOX3_GATEWAY_GITHUB_TOKEN: ${{ secrets.SANDBOX3_GATEWAY_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$SANDBOX3_WORKER_TOKEN"
+          test -n "$SANDBOX3_GATEWAY_GITHUB_TOKEN"
+          npx wrangler whoami > "$RUNNER_TEMP/whoami.txt"
+          grep -F "d740a05e9442c1d0feacae2dfc673e93" "$RUNNER_TEMP/whoami.txt"
+          grep -iF "typeformowner@gmail.com" "$RUNNER_TEMP/whoami.txt"
+          npx wrangler deploy --config wrangler.sandbox3.jsonc --var "BUILD_SHA:$GITHUB_SHA" --var "GITHUB_REF:$SANDBOX3_RUNTIME_REF"
+          node -e 'process.stdout.write(JSON.stringify({WORKER_TOKEN:process.env.SANDBOX3_WORKER_TOKEN,GITHUB_TOKEN:process.env.SANDBOX3_GATEWAY_GITHUB_TOKEN}))' | npx wrangler secret bulk --config wrangler.sandbox3.jsonc
+      - name: Verify exact source, free policy and anonymous launch rejection
+        run: node scripts/sandbox3-deployment-smoke.mjs "$GITHUB_SHA"

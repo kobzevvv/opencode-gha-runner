@@ -24,3 +24,19 @@ separate fixed-target operation and requires verified source/account/namespace.
 Architecture issue #236 authorizes repairing this existing test chain through
 reviewed PRs. No new paid resources or production deployments are authorized.
 Public health and local mocks are not full Telegram acceptance evidence.
+
+## Fresh sandbox3
+
+`wrangler.sandbox3.jsonc` declares the separate native gateway and RUNS namespace
+for `integration-sandbox3-v1`. Preserve the existing component gateway, its ref,
+credentials and runs. Sandbox3 reuses the native launcher through
+`run-agent-sandbox3.yml`: free ladder only, 180-second agent limit, 1 MiB output
+and log limits, serialized jobs and a 10-minute job ceiling. A signed profile
+snapshot and run-scoped saveback capability are required before admission.
+This does not establish a filesystem quota or full Telegram acceptance.
+
+Deploy reviewed main using `deploy-sandbox3.yml` and environment
+`native-sandbox3`. Its CF_API_TOKEN, SANDBOX3_WORKER_TOKEN and
+SANDBOX3_GATEWAY_GITHUB_TOKEN are private deployment credentials, never agent
+environment values. The workflow verifies the existing account, uses an
+immutable runtime branch and checks source/policy plus anonymous rejection.

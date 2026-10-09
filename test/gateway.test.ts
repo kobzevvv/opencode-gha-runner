@@ -44,6 +44,8 @@ function harness(options: {
   workflowState?: { status: string; conclusion: string | null } | null;
   workflowStatusRefreshMs?: number;
   deliveryStatus?: number;
+  sandbox3FreeOnly?: boolean;
+  buildSha?: string;
 } = {}): Harness {
   const store = new MemoryRunStore();
   const dispatched: Array<{ runId: string; claimToken: string }> = [];
@@ -81,7 +83,7 @@ function harness(options: {
   } as unknown as GitHubClient;
 
   const app = createGateway({
-    config,
+    config: { ...config, sandbox3FreeOnly: options.sandbox3FreeOnly, buildSha: options.buildSha },
     store,
     github,
     workflowStatusRefreshMs: options.workflowStatusRefreshMs ?? 0,
@@ -534,6 +536,64 @@ test('healthz без авторизации', async () => {
   const response = await h.fetch(new Request('https://worker.example/healthz'));
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('cache-control'), 'no-store');
+});
+
+const sandbox3Profile = {
+  profileId: 'integration-sandbox3-v1',
+  profileWorkspace: {
+    bindingId: 'sandbox3-binding', snapshotUrl: 'https://storage.example/signed-snapshot',
+    snapshotSha256: 'a'.repeat(64), snapshotSize: 123,
+    savebackUrl: 'https://api.example/v1/worker/launches/run/profile-changes',
+    savebackToken: 'x'.repeat(48), artifacts: [], excludedPatterns: [],
+  },
+};
+
+test('sandbox3 refuses paid models and excessive limits before dispatching or storing a run', async () => {
+  for (const overrides of [
+    { engine: { name: 'dynamic-ip-azure-agent-run', adapterVersion: '1', modelSettings: { model: 'doctor' } } },
+    { limits: { timeoutMs: 180001, maxOutputBytes: 1024, maxLogBytes: 1024 } },
+    { limits: { timeoutMs: 180000, maxOutputBytes: 1048577, maxLogBytes: 1024 } },
+    { limits: { timeoutMs: 180000, maxOutputBytes: 1024, maxLogBytes: 1048577 } },
+  ]) {
+    const h = harness({ sandbox3FreeOnly: true });
+    const response = await h.fetch(launch(spec({ ...sandbox3Profile, ...overrides })));
+    assert.ok([400, 403].includes(response.status));
+    assert.equal(h.dispatched.length, 0);
+    assert.equal(await h.store.get(RUN_ID), null);
+  }
+});
+test('sandbox3 requires its isolated profile and API-managed snapshot/saveback', async () => {
+  for (const override of [{ profileWorkspace: undefined }, { profileId: 'another-profile' }]) {
+    const h = harness({ sandbox3FreeOnly: true });
+    const response = await h.fetch(launch(spec({ ...sandbox3Profile,
+      limits: { timeoutMs: 180000, maxOutputBytes: 1024, maxLogBytes: 1024 }, ...override })));
+    assert.equal(response.status, 400);
+    assert.equal(h.dispatched.length, 0);
+    assert.equal(await h.store.get(RUN_ID), null);
+  }
+});
+test('sandbox3 defaults the accepted run to the free ladder and preserves same-operation deduplication', async () => {
+  const h = harness({ sandbox3FreeOnly: true });
+  const body = spec({ ...sandbox3Profile, engine: { name: 'dynamic-ip-azure-agent-run', adapterVersion: '1' },
+    limits: { timeoutMs: 180000, maxOutputBytes: 1048576, maxLogBytes: 1048576 } });
+  assert.equal((await h.fetch(launch(body))).status, 202);
+  assert.equal((await h.fetch(launch(body))).status, 202);
+  assert.equal(h.dispatched.length, 1);
+  assert.equal((await h.store.get(RUN_ID))?.request.engine.modelSettings?.model, 'free');
+  const health = await (await h.fetch(new Request('https://worker.example/healthz'))).json() as Record<string, unknown>;
+  assert.equal(health.sandboxPolicy, 'free-only-v1');
+});
+test('public source health reports a validated SHA without credentials', async () => {
+  const h = harness({ buildSha: 'a'.repeat(40), sandbox3FreeOnly: true });
+  const response = await h.fetch(new Request('https://worker.example/healthz'));
+  const body = await response.text();
+  assert.equal(JSON.parse(body).buildSha, 'a'.repeat(40));
+  assert.equal(JSON.parse(body).configured, true);
+  for (const secret of [WORKER_TOKEN, TELEGRAM_UX_TOKEN, config.githubToken]) {
+    assert.equal(body.includes(secret), false);
+  }
+  const invalid = harness({ buildSha: 'not-a-sha' });
+  assert.equal((await (await invalid.fetch(new Request('https://worker.example/healthz'))).json() as Record<string, unknown>).buildSha, undefined);
 });
 
 test('claim отдаёт spec с ключом и гасит токен', async () => {

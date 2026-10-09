@@ -1,0 +1,23 @@
+{
+  "name": "trained-assist-native-worker-sandbox3",
+  "main": "dist/src/worker.js",
+  "compatibility_date": "2024-12-30",
+  "workers_dev": true,
+  "kv_namespaces": [
+    {
+      "binding": "RUNS",
+      "id": "2bec6206094d47ea935df769c1fa5411"
+    }
+  ],
+  "vars": {
+    "DEPLOYMENT_ENV": "sandbox3",
+    "GITHUB_REPO": "kobzevvv/opencode-gha-runner",
+    "GITHUB_WORKFLOW": "run-agent-sandbox3.yml",
+    "GITHUB_REF": "main",
+    "PUBLIC_BASE_URL": "https://trained-assist-native-worker-sandbox3.skillset-apply.workers.dev",
+    "AGENT_BINARY": "opencode"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

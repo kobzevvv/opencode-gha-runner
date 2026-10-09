@@ -477,6 +477,21 @@ npx wrangler deploy
 
 ## Структура
 
+### Изолированный sandbox3
+
+`wrangler.sandbox3.jsonc` и `run-agent-sandbox3.yml` используют существующий
+native launcher с отдельным KV. Gateway принимает только профиль
+`integration-sandbox3-v1` со snapshot/saveback, принудительно выбирает
+`ladder/free` и ограничивает агента 180 секундами, вывод и лог — 1 MiB каждый.
+Джобы выполняются последовательно, с потолком 10 минут. Логи хранятся локально;
+дополнительная инфраструктура GCP не требуется. Это не квота диска.
+
+После CI и merge в main запустите `Deploy Native sandbox3 gateway` с секретами
+окружения `native-sandbox3`, описанными в AGENTS.md. Deployment закрепляет
+workflow за веткой `runtime/sandbox3/<SHA>` без перезаписи существующей ссылки.
+Проверка health и отказа анонимному запросу не запускает модель и не заменяет
+Telegram E2E.
+
 | Путь | Что |
 |---|---|
 | `src/contracts.ts` | типы и валидация `LaunchRequest` / `LaunchResult`, redaction |

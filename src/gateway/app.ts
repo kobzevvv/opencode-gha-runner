@@ -31,6 +31,8 @@ import { Ring, type RingTarget } from './ring.js';
 import { isTerminal, workerStatus, type KvLike, type RunStore, type StoredRun } from './store.js';
 
 export interface GatewayConfig {
+  buildSha?: string;
+  sandbox3FreeOnly?: boolean;
   /** Общий секрет между нашим API и воркером (`Authorization: Bearer`). */
   workerToken: string;
   /** Optional isolated client credential for the Telegram UX sandbox. */
@@ -218,6 +220,19 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
 
   async function handleLaunch(request: Request, credentialId: 'primary' | 'telegram_ux'): Promise<Response> {
     const spec = validateLaunchRequest(await readJson(request));
+    if (config.sandbox3FreeOnly) {
+      if (spec.profileId !== 'integration-sandbox3-v1' || !spec.profileWorkspace) {
+        return json({ error: 'sandbox_profile_workspace_required' }, 400, noStore());
+      }
+      const model = spec.engine.modelSettings?.model;
+      if (model !== undefined && model !== 'free' && model !== 'ladder/free') {
+        return json({ error: 'sandbox_model_not_allowed' }, 403, noStore());
+      }
+      if (spec.limits.timeoutMs > 180_000 || spec.limits.maxOutputBytes > 1_048_576 || spec.limits.maxLogBytes > 1_048_576) {
+        return json({ error: 'sandbox_limits_exceeded' }, 400, noStore());
+      }
+      spec.engine = { ...spec.engine, modelSettings: { model: 'free' } };
+    }
 
     // Дедупликация по operationId, а не по runId: наш API повторяет доставку того же
     // запуска, и повтор обязан вернуть ту же квитанцию и тот же ран. Дедуп по runId
@@ -551,7 +566,10 @@ async function handleCancel(runId: string): Promise<Response> {
 
       try {
         if (request.method === 'GET' && (path === '/healthz' || path === '/')) {
-          return json({ ok: true, engine: ENGINE_NAME, repo: config.repo, workflow: config.workflow }, 200, noStore());
+          return json({ ok: true, configured: Boolean(config.workerToken && config.githubToken), engine: ENGINE_NAME, repo: config.repo, workflow: config.workflow,
+            ...(config.buildSha && /^[a-f0-9]{40}$/.test(config.buildSha) ? { buildSha: config.buildSha } : {}),
+            ...(config.sandbox3FreeOnly ? { sandboxPolicy: 'free-only-v1' } : {}),
+          }, 200, noStore());
         }
 
         if (request.method === 'POST' && path === '/v1/launch') {

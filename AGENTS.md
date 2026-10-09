@@ -44,3 +44,17 @@ Deploy reviewed main using `deploy-sandbox3.yml` and environment
 SANDBOX3_GATEWAY_GITHUB_TOKEN are private deployment credentials, never agent
 environment values. The workflow verifies the existing account, uses an
 immutable runtime branch and checks source/policy plus anonymous rejection.
+
+`sandbox3-storage-provision.yml` reuses the Google IAM service-account/key
+creation mechanism used by documents `gdrive_setup`, in its existing
+`trained-assist-gdrive-sa` project. It uses the current GitHub WIF identity,
+without calling the retired VM. Default `inspect` mode checks project creation,
+key management and existing-bucket IAM capabilities without mutation. `apply`
+creates only `ta-runner-sandbox3`, grants `roles/storage.objectUser` on the
+existing profile bucket while preserving IAM policy/etag, and writes private
+JSON directly to CP environment `sandbox` secret `SANDBOX3_GCS_CREDENTIALS`.
+Existing destination secrets are preserved. Existing unknown keys and lost
+creation/write responses require reconciliation; never erase keys or blindly
+regenerate credentials. Artifacts contain metadata only. A saved credential
+does not prove storage or Runner readiness; verify the consumer's exact
+identity contract and object/signing round trip before native configuration.

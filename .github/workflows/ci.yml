@@ -24,3 +24,5 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run verify
+      - name: Sandbox storage provisioning boundaries
+        run: node --test scripts/sandbox3-storage-provision.test.mjs

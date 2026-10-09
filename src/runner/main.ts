@@ -44,6 +44,7 @@ import { uploadSessionLog, type LogUploadMode } from './logs.js';
 import { materializeProfileObjects, uploadProfileObject } from './profile-objects.js';
 import { collectProfileChanges } from './profile-changes.js';
 import { materializeProfileSnapshot, uploadProfileChanges } from './profile-snapshot.js';
+import { agentArguments } from './agent-args.js';
 
 const exec = promisify(execFile);
 
@@ -602,9 +603,9 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       injectedSecrets: mcpSecrets,
     });
     const extraArgs = (env.AGENT_ARGS ?? '').split(' ').filter(Boolean);
-    const agentArgs = [...extraArgs, 'run', spec.input.inlinePrompt];
+    const agentArgs = agentArguments(extraArgs, spec.engine.modelSettings?.model, spec.input.inlinePrompt);
     // Промпт в лог не пишем: он может содержать секреты, а лог уезжает в GCS.
-    sessionLog.append('stdout', `\n$ ${claim.agentBinary} ${extraArgs.join(' ')} run <prompt>\n`);
+    sessionLog.append('stdout', `\n$ ${claim.agentBinary} ${agentArgs.slice(0, -1).join(' ')} <prompt>\n`);
 
     agentAttempted = true;
     const outcome = await runAgent({

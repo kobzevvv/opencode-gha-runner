@@ -20,11 +20,9 @@ test('malformed model settings cannot become agent flags', () => {
 });
 test('invalid model identifiers are rejected during launch validation', () => {
   for (const model of ['', '--model', 'free --other', 'free\nsecret', 'x'.repeat(201)]) {
-    const request = validLaunchRequest();
-    request.engine.modelSettings = { model };
+    const request = validLaunchRequest({ engine: { name: 'dynamic-ip-azure-agent-run', adapterVersion: '1', modelSettings: { model } } });
     assert.throws(() => validateLaunchRequest(request), /engine.modelSettings.model/);
   }
-  const valid = validLaunchRequest();
-  valid.engine.modelSettings = { model: 'free:plan' };
+  const valid = validLaunchRequest({ engine: { name: 'dynamic-ip-azure-agent-run', adapterVersion: '1', modelSettings: { model: 'free:plan' } } });
   assert.doesNotThrow(() => validateLaunchRequest(valid));
 });

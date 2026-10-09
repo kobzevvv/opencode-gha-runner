@@ -1,0 +1,48 @@
+name: Provision sandbox3 Runner storage identity
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [inspect, apply]
+        default: inspect
+        required: true
+        description: Inspect permissions or create the dedicated sandbox3 identity and protected credential
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: native-sandbox3-storage-provision
+  cancel-in-progress: false
+jobs:
+  provision:
+    if: github.ref == 'refs/heads/main'
+    environment: native-sandbox3
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: google-github-actions/auth@v2
+        id: auth
+        with:
+          workload_identity_provider: ${{ vars.GCS_WORKLOAD_PROVIDER }}
+          service_account: ${{ vars.GCS_SERVICE_ACCOUNT }}
+          token_format: access_token
+      - name: Provision through existing Google IAM APIs
+        env:
+          STORAGE_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          GH_TOKEN: ${{ secrets.SANDBOX3_GATEWAY_GITHUB_TOKEN }}
+          STORAGE_PROVISION_MODE: ${{ inputs.mode }}
+        run: node scripts/sandbox3-storage-provision.mjs
+      - name: Upload metadata only
+        if: always() && hashFiles('sandbox3-storage-provision-evidence.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox3-storage-provision-${{ github.run_id }}
+          path: sandbox3-storage-provision-evidence.json
+          retention-days: 30

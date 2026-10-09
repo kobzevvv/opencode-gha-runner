@@ -7,4 +7,5 @@ dist/
 .env.*
 .DS_Store
 .accept/
+sandbox3-storage-provision-evidence.json
 # состояние скрипта deploy-and-accept.sh: ключи и api.env с секретами

@@ -31,8 +31,12 @@ import { Ring, type RingTarget } from './ring.js';
 import { isTerminal, workerStatus, type KvLike, type RunStore, type StoredRun } from './store.js';
 
 export interface GatewayConfig {
+  buildSha?: string;
+  sandbox3FreeOnly?: boolean;
   /** Общий секрет между нашим API и воркером (`Authorization: Bearer`). */
   workerToken: string;
+  /** Optional isolated client credential for the Telegram UX sandbox. */
+  telegramUxWorkerToken?: string;
   /** Репозиторий с workflow: `owner/name`. */
   repo: string;
   /** Файл workflow, например `run-agent.yml`. */
@@ -69,6 +73,8 @@ export interface GatewayDeps {
   fetchImpl?: typeof fetch;
   /** Генератор токенов — подменяется в тестах на детерминированный. */
   randomToken?: () => string;
+  /** Минимальная пауза между сверками GHA статуса непринятого workflow. */
+  workflowStatusRefreshMs?: number;
   /** Логирование. По умолчанию ничего не печатает: тело запроса содержит `llmKey`. */
   log?: (message: string, fields?: Record<string, unknown>) => void;
   now?: () => number;
@@ -117,6 +123,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
   const { config, store } = deps;
   const randomToken = deps.randomToken ?? defaultRandomToken;
   const now = deps.now ?? (() => Date.now());
+  const workflowStatusRefreshMs = deps.workflowStatusRefreshMs ?? 30_000;
   const log = deps.log ?? ((): void => {});
   // Клиент строится под цель: у каждого репозитория кольца свой токен и своя история
   // прогонов. Кэш по ключу «репозиторий+токен» — чтобы не пересобирать на каждый запрос.
@@ -187,16 +194,45 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     }
   }
 
-  function requireWorkerAuth(request: Request): Response | null {
+  function workerCredential(request: Request): 'primary' | 'telegram_ux' | null {
     const token = bearer(request);
-    if (!token || !timingSafeEqual(token, config.workerToken)) {
-      return json({ error: 'unauthorized' }, 401, noStore({ 'www-authenticate': 'Bearer' }));
-    }
+    if (!token) return null;
+    if (timingSafeEqual(token, config.workerToken)) return 'primary';
+    if (config.telegramUxWorkerToken && timingSafeEqual(token, config.telegramUxWorkerToken)) return 'telegram_ux';
     return null;
   }
 
-  async function handleLaunch(request: Request): Promise<Response> {
+  function requireWorkerAuth(request: Request): { credentialId: 'primary' | 'telegram_ux' } | Response {
+    const credentialId = workerCredential(request);
+    return credentialId
+      ? { credentialId }
+      : json({ error: 'unauthorized' }, 401, noStore({ 'www-authenticate': 'Bearer' }));
+  }
+
+  function credentialToken(credentialId: 'primary' | 'telegram_ux' | undefined): string {
+    return credentialId === 'telegram_ux' ? config.telegramUxWorkerToken! : config.workerToken;
+  }
+
+  function ownsRun(run: StoredRun, credentialId: 'primary' | 'telegram_ux'): boolean {
+    // Pre-existing KV records predate credential IDs and belong to the primary key.
+    return (run.credentialId ?? 'primary') === credentialId;
+  }
+
+  async function handleLaunch(request: Request, credentialId: 'primary' | 'telegram_ux'): Promise<Response> {
     const spec = validateLaunchRequest(await readJson(request));
+    if (config.sandbox3FreeOnly) {
+      if (spec.profileId !== 'integration-sandbox3-v1' || !spec.profileWorkspace) {
+        return json({ error: 'sandbox_profile_workspace_required' }, 400, noStore());
+      }
+      const model = spec.engine.modelSettings?.model;
+      if (model !== undefined && model !== 'free' && model !== 'ladder/free') {
+        return json({ error: 'sandbox_model_not_allowed' }, 403, noStore());
+      }
+      if (spec.limits.timeoutMs > 180_000 || spec.limits.maxOutputBytes > 1_048_576 || spec.limits.maxLogBytes > 1_048_576) {
+        return json({ error: 'sandbox_limits_exceeded' }, 400, noStore());
+      }
+      spec.engine = { ...spec.engine, modelSettings: { model: 'free' } };
+    }
 
     // Дедупликация по operationId, а не по runId: наш API повторяет доставку того же
     // запуска, и повтор обязан вернуть ту же квитанцию и тот же ран. Дедуп по runId
@@ -204,6 +240,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     // ещё идёт, ровно тот дефект, который контракт исключает.
     const existing = await store.findByOperationId(spec.operationId);
     if (existing) {
+      if (!ownsRun(existing, credentialId)) return json({ error: 'operation_id_conflict' }, 409, noStore());
       log('launch deduplicated', { runId: existing.runId, operationId: spec.operationId, phase: existing.phase });
       return json(receipt(existing), 202, noStore());
     }
@@ -217,6 +254,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     const claimToken = randomToken();
     const reportToken = randomToken();
     await store.create({
+      credentialId,
       runId: spec.runId,
       operationId: spec.operationId,
       request: spec,
@@ -354,7 +392,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     const accepted = await store.complete(runId, token, result);
     log('run result accepted', { runId, accepted, exitReason: result.exitReason });
 
-    await deliverToApi(stored.request.resultUrl, result);
+    await deliverToApi(stored.request.resultUrl, result, stored.credentialId);
     return json({ runId, status: 'accepted', exitReason: result.exitReason }, 200, noStore());
   }
 
@@ -363,13 +401,13 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
    * результат уже лежит у нас, и API заберёт его опросом. Молча терять нельзя — поэтому
    * в лог уходит причина без тела результата.
    */
-  async function deliverToApi(resultUrl: string, result: LaunchResult): Promise<void> {
+  async function deliverToApi(resultUrl: string, result: LaunchResult, credentialId?: 'primary' | 'telegram_ux'): Promise<void> {
     const fetchImpl = deps.fetchImpl ?? fetch.bind(globalThis);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         const response = await fetchImpl(resultUrl, {
           method: 'POST',
-          headers: { authorization: `Bearer ${config.workerToken}`, 'content-type': 'application/json' },
+          headers: { authorization: `Bearer ${credentialToken(credentialId)}`, 'content-type': 'application/json' },
           body: JSON.stringify(result),
         });
         if (response.ok || response.status === 409) {
@@ -384,14 +422,81 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     }
   }
 
+  /**
+   * A workflow may fail before the runner claims its one-time token (for example,
+   * during cloud authentication). In that case no job can later execute this run,
+   * so the gateway can safely turn GitHub's terminal failure into the worker result.
+   * Once claimed, only the runner may report the result: a failed Actions job could
+   * have lost its report after the agent already performed work.
+   */
+  async function reconcileUnclaimedWorkflow(run: StoredRun): Promise<void> {
+    if (run.phase !== 'dispatched' || run.githubRunId === null) return;
+    if (now() - run.updatedAt < workflowStatusRefreshMs) return;
+
+    let workflow: { status: string; conclusion: string | null } | null;
+    try {
+      workflow = await clientFor(run.target).getWorkflowRunState(run.githubRunId);
+    } catch (cause) {
+      log('workflow status check failed', {
+        runId: run.runId,
+        error: redact(cause instanceof Error ? cause.message : String(cause)),
+      });
+      await store.patch(run.runId, {});
+      return;
+    }
+    // Throttle checks even if GitHub has not indexed the run or reports it missing.
+    await store.patch(run.runId, {});
+    if (!workflow || workflow.status !== 'completed' || !workflow.conclusion || workflow.conclusion === 'success') return;
+
+    // Do not overwrite a claim/result that arrived while GitHub was being queried.
+    const current = await store.get(run.runId);
+    if (!current || current.phase !== 'dispatched') return;
+
+    const cancelled = workflow.conclusion === 'cancelled';
+    const result: LaunchResult = {
+      runId: run.runId,
+      status: 'failed',
+      pid: null,
+      exitCode: null,
+      exitSignal: null,
+      exitReason: cancelled ? 'cancelled' : 'startup_failure',
+      stdout: '',
+      stderr: `GitHub Actions workflow concluded ${workflow.conclusion} before the runner claimed this run`,
+      answerSource: null,
+      durationMs: Math.max(0, now() - run.createdAt),
+      timedOut: workflow.conclusion === 'timed_out',
+      outputTruncated: false,
+      artifacts: [],
+      logUrl: `https://github.com/${run.target.repo}/actions/runs/${run.githubRunId}`,
+      repo: {
+        fullName: run.request.repository.fullName,
+        branch: run.request.repository.branch,
+        commit: '0'.repeat(40),
+      },
+      ...(cancelled ? {} : {
+        failure: failure(
+          'WORKER_INTERNAL',
+          'engine',
+          `GitHub Actions workflow concluded ${workflow.conclusion} before the runner claimed this run`,
+        ),
+      }),
+    };
+    const accepted = await store.complete(run.runId, run.reportToken, result);
+    if (!accepted) return;
+    log('unclaimed workflow completed', { runId: run.runId, conclusion: workflow.conclusion });
+    await deliverToApi(run.request.resultUrl, result);
+  }
+
   /** `GET /v1/runs/{runId}/status` — контрактный статус, без результата. */
   async function handleRunStatus(runId: string): Promise<Response> {
-    const run = await store.get(runId);
+    let run = await store.get(runId);
     // Неизвестный ран — это `unknown`, а не 404: исход установить нельзя, и наш API
     // должен пойти в reconcile, а не решить, что запуска не было.
     if (!run) {
       return json({ runId, status: 'unknown', updatedAt: new Date(now()).toISOString() }, 200, noStore());
     }
+    await reconcileUnclaimedWorkflow(run);
+    run = await store.get(runId) ?? run;
     return json(
       { runId, status: workerStatus(run), updatedAt: new Date(run.updatedAt).toISOString() },
       200,
@@ -461,13 +566,16 @@ async function handleCancel(runId: string): Promise<Response> {
 
       try {
         if (request.method === 'GET' && (path === '/healthz' || path === '/')) {
-          return json({ ok: true, engine: ENGINE_NAME, repo: config.repo, workflow: config.workflow }, 200, noStore());
+          return json({ ok: true, configured: Boolean(config.workerToken && config.githubToken), engine: ENGINE_NAME, repo: config.repo, workflow: config.workflow,
+            ...(config.buildSha && /^[a-f0-9]{40}$/.test(config.buildSha) ? { buildSha: config.buildSha } : {}),
+            ...(config.sandbox3FreeOnly ? { sandboxPolicy: 'free-only-v1' } : {}),
+          }, 200, noStore());
         }
 
         if (request.method === 'POST' && path === '/v1/launch') {
-          const denied = requireWorkerAuth(request);
-          if (denied) return denied;
-          return await handleLaunch(request);
+          const auth = requireWorkerAuth(request);
+          if (auth instanceof Response) return auth;
+          return await handleLaunch(request, auth.credentialId);
         }
 
         if (request.method === 'POST' && path === CLAIM_PATH) {
@@ -482,22 +590,28 @@ async function handleCancel(runId: string): Promise<Response> {
 
         if (request.method === 'POST' && /^\/v1\/runs\/[^/]+\/cancel$/.test(path)) {
           const runId = decodeURIComponent(path.split('/')[3]!);
-          const denied = requireWorkerAuth(request);
-          if (denied) return denied;
+          const auth = requireWorkerAuth(request);
+          if (auth instanceof Response) return auth;
+          const run = await store.get(runId);
+          if (run && !ownsRun(run, auth.credentialId)) return json({ error: 'not_found' }, 404, noStore());
           return await handleCancel(runId);
         }
 
         if (request.method === 'GET' && /^\/v1\/runs\/[^/]+\/status$/.test(path)) {
           const runId = decodeURIComponent(path.split('/')[3]!);
-          const denied = requireWorkerAuth(request);
-          if (denied) return denied;
+          const auth = requireWorkerAuth(request);
+          if (auth instanceof Response) return auth;
+          const run = await store.get(runId);
+          if (run && !ownsRun(run, auth.credentialId)) return json({ error: 'not_found' }, 404, noStore());
           return await handleRunStatus(runId);
         }
 
         if (request.method === 'GET' && /^\/v1\/runs\/[^/]+\/result$/.test(path)) {
           const runId = decodeURIComponent(path.split('/')[3]!);
-          const denied = requireWorkerAuth(request);
-          if (denied) return denied;
+          const auth = requireWorkerAuth(request);
+          if (auth instanceof Response) return auth;
+          const run = await store.get(runId);
+          if (run && !ownsRun(run, auth.credentialId)) return json({ error: 'not_found' }, 404, noStore());
           return await handleRunResult(runId);
         }
 

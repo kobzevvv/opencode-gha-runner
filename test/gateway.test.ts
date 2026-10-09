@@ -14,9 +14,11 @@ import { MemoryRunStore } from '../src/gateway/store.js';
 import { validLaunchRequest } from './contracts.test.js';
 
 const WORKER_TOKEN = 'worker-token-for-tests';
+const TELEGRAM_UX_TOKEN = 'telegram-ux-token-for-tests';
 const API_RESULT_URL = 'https://api.example/v1/worker/launches/run_x/result';
 const config: GatewayConfig = {
   workerToken: WORKER_TOKEN,
+  telegramUxWorkerToken: TELEGRAM_UX_TOKEN,
   repo: 'vovalikessmoothy-png/opencode-gha-runner',
   workflow: 'run-agent.yml',
   publicBaseUrl: 'https://worker.example',
@@ -29,6 +31,7 @@ interface Harness {
   store: MemoryRunStore;
   dispatched: Array<{ runId: string; claimToken: string }>;
   cancelled: number[];
+  workflowStatusLookups: number[];
   /** Что шлюз переслал нашему API на `resultUrl`. */
   delivered: Array<{ url: string; auth: string | null; body: unknown }>;
 }
@@ -38,11 +41,16 @@ function harness(options: {
   dispatchFails?: 'rejected' | 'ambiguous';
   /** Что вернёт `findRunSince` при неоднозначном отказе. `null` — прогона не появилось. */
   runAppeared?: { id: number } | null;
+  workflowState?: { status: string; conclusion: string | null } | null;
+  workflowStatusRefreshMs?: number;
   deliveryStatus?: number;
+  sandbox3FreeOnly?: boolean;
+  buildSha?: string;
 } = {}): Harness {
   const store = new MemoryRunStore();
   const dispatched: Array<{ runId: string; claimToken: string }> = [];
   const cancelled: number[] = [];
+  const workflowStatusLookups: number[] = [];
   const delivered: Array<{ url: string; auth: string | null; body: unknown }> = [];
   let counter = 0;
   let findRunSinceCalls = 0;
@@ -66,12 +74,19 @@ function harness(options: {
       cancelled.push(runId);
       return { cancelled: true, reason: 'cancelled' as const };
     },
+    getWorkflowRunState: async (runId: number) => {
+      workflowStatusLookups.push(runId);
+      return options.workflowState === undefined
+        ? { status: 'in_progress', conclusion: null }
+        : options.workflowState;
+    },
   } as unknown as GitHubClient;
 
   const app = createGateway({
-    config,
+    config: { ...config, sandbox3FreeOnly: options.sandbox3FreeOnly, buildSha: options.buildSha },
     store,
     github,
+    workflowStatusRefreshMs: options.workflowStatusRefreshMs ?? 0,
     randomToken: () => {
       counter += 1;
       return `token-${counter}`;
@@ -87,7 +102,7 @@ function harness(options: {
     }) as unknown as typeof fetch,
   });
 
-  return { fetch: app.fetch, store, dispatched, cancelled, delivered };
+  return { fetch: app.fetch, store, dispatched, cancelled, workflowStatusLookups, delivered };
 }
 
 const spec = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -169,6 +184,29 @@ test('launch без токена — 401', async () => {
   const h = harness();
   assert.equal((await h.fetch(launch(spec(), null))).status, 401);
   assert.equal(h.dispatched.length, 0);
+});
+
+test('дополнительный ключ изолирован по ранам и callback использует тот же ключ', async () => {
+  const h = harness();
+  const specA = spec({ runId: 'run_telegram_ux_01', operationId: 'op_telegram_ux_01' });
+  const accepted = await h.fetch(launch(specA, TELEGRAM_UX_TOKEN));
+  assert.equal(accepted.status, 202);
+  assert.equal((await h.store.get('run_telegram_ux_01'))?.credentialId, 'telegram_ux');
+
+  assert.equal((await h.fetch(get('/v1/runs/run_telegram_ux_01/status'))).status, 404);
+  assert.equal((await h.fetch(get('/v1/runs/run_telegram_ux_01/status', TELEGRAM_UX_TOKEN))).status, 200);
+  assert.equal((await h.fetch(post('/v1/runs/run_telegram_ux_01/cancel', {}, WORKER_TOKEN))).status, 404);
+  assert.equal((await h.fetch(launch({ ...specA, runId: 'run_conflict_0001' }, WORKER_TOKEN))).status, 409);
+
+  const runClaimToken = h.dispatched.at(-1)!.claimToken;
+  const claimResponse = await h.fetch(post('/v1/claim', { runId: 'run_telegram_ux_01' }, runClaimToken));
+  const claim = (await claimResponse.json()) as { reportToken: string };
+  await h.fetch(post('/v1/runs/run_telegram_ux_01/report', {
+    status: 'succeeded', exitCode: 0, exitSignal: null, exitReason: 'completed', stdout: '', stderr: '',
+    answerSource: 'engine_stdout', durationMs: 10, timedOut: false, outputTruncated: false, artifacts: [], logUrl: '',
+    repo: { fullName: 'owner/name', branch: 'main', commit: 'a'.repeat(40) },
+  }, claim.reportToken));
+  assert.equal(h.delivered.at(-1)?.auth, `Bearer ${TELEGRAM_UX_TOKEN}`);
 });
 
 test('launch с некорректным телом — 400 со списком проблем', async () => {
@@ -335,6 +373,33 @@ test('status завершённого рана — succeeded', async () => {
   assert.equal(body['status'], 'succeeded');
 });
 
+test('status closes a failed GitHub workflow that never claimed the run', async () => {
+  const h = harness({ workflowState: { status: 'completed', conclusion: 'failure' } });
+  await h.fetch(launch(spec()));
+
+  const status = (await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as Record<string, unknown>;
+  assert.equal(status['status'], 'failed');
+  assert.deepEqual(h.workflowStatusLookups, [4242]);
+
+  const result = (await (await h.fetch(get(`/v1/runs/${RUN_ID}/result`))).json()) as Record<string, unknown>;
+  assert.equal(result['exitReason'], 'startup_failure');
+  assert.equal((result['failure'] as { code: string }).code, 'WORKER_INTERNAL');
+  assert.equal(h.delivered.length, 1);
+  assert.equal((h.delivered[0]!.body as { status: string }).status, 'failed');
+  assert.equal((await h.store.get(RUN_ID))?.phase, 'done');
+});
+
+test('a completed GHA failure does not replace the result after the runner claimed', async () => {
+  const h = harness({ workflowState: { status: 'completed', conclusion: 'failure' } });
+  await h.fetch(launch(spec()));
+  await h.fetch(post('/v1/claim', { runId: RUN_ID }, h.dispatched[0]!.claimToken));
+
+  const status = (await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as Record<string, unknown>;
+  assert.equal(status['status'], 'running');
+  assert.deepEqual(h.workflowStatusLookups, []);
+  assert.equal(h.delivered.length, 0);
+});
+
 test('status неизвестного рана — unknown, а не 404: наш API идёт в reconcile', async () => {
   const h = harness();
   const response = await h.fetch(get('/v1/runs/run_нет_такого/status'));
@@ -471,6 +536,64 @@ test('healthz без авторизации', async () => {
   const response = await h.fetch(new Request('https://worker.example/healthz'));
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('cache-control'), 'no-store');
+});
+
+const sandbox3Profile = {
+  profileId: 'integration-sandbox3-v1',
+  profileWorkspace: {
+    bindingId: 'sandbox3-binding', snapshotUrl: 'https://storage.example/signed-snapshot',
+    snapshotSha256: 'a'.repeat(64), snapshotSize: 123,
+    savebackUrl: 'https://api.example/v1/worker/launches/run/profile-changes',
+    savebackToken: 'x'.repeat(48), artifacts: [], excludedPatterns: [],
+  },
+};
+
+test('sandbox3 refuses paid models and excessive limits before dispatching or storing a run', async () => {
+  for (const overrides of [
+    { engine: { name: 'dynamic-ip-azure-agent-run', adapterVersion: '1', modelSettings: { model: 'doctor' } } },
+    { limits: { timeoutMs: 180001, maxOutputBytes: 1024, maxLogBytes: 1024 } },
+    { limits: { timeoutMs: 180000, maxOutputBytes: 1048577, maxLogBytes: 1024 } },
+    { limits: { timeoutMs: 180000, maxOutputBytes: 1024, maxLogBytes: 1048577 } },
+  ]) {
+    const h = harness({ sandbox3FreeOnly: true });
+    const response = await h.fetch(launch(spec({ ...sandbox3Profile, ...overrides })));
+    assert.ok([400, 403].includes(response.status));
+    assert.equal(h.dispatched.length, 0);
+    assert.equal(await h.store.get(RUN_ID), null);
+  }
+});
+test('sandbox3 requires its isolated profile and API-managed snapshot/saveback', async () => {
+  for (const override of [{ profileWorkspace: undefined }, { profileId: 'another-profile' }]) {
+    const h = harness({ sandbox3FreeOnly: true });
+    const response = await h.fetch(launch(spec({ ...sandbox3Profile,
+      limits: { timeoutMs: 180000, maxOutputBytes: 1024, maxLogBytes: 1024 }, ...override })));
+    assert.equal(response.status, 400);
+    assert.equal(h.dispatched.length, 0);
+    assert.equal(await h.store.get(RUN_ID), null);
+  }
+});
+test('sandbox3 defaults the accepted run to the free ladder and preserves same-operation deduplication', async () => {
+  const h = harness({ sandbox3FreeOnly: true });
+  const body = spec({ ...sandbox3Profile, engine: { name: 'dynamic-ip-azure-agent-run', adapterVersion: '1' },
+    limits: { timeoutMs: 180000, maxOutputBytes: 1048576, maxLogBytes: 1048576 } });
+  assert.equal((await h.fetch(launch(body))).status, 202);
+  assert.equal((await h.fetch(launch(body))).status, 202);
+  assert.equal(h.dispatched.length, 1);
+  assert.equal((await h.store.get(RUN_ID))?.request.engine.modelSettings?.model, 'free');
+  const health = await (await h.fetch(new Request('https://worker.example/healthz'))).json() as Record<string, unknown>;
+  assert.equal(health.sandboxPolicy, 'free-only-v1');
+});
+test('public source health reports a validated SHA without credentials', async () => {
+  const h = harness({ buildSha: 'a'.repeat(40), sandbox3FreeOnly: true });
+  const response = await h.fetch(new Request('https://worker.example/healthz'));
+  const body = await response.text();
+  assert.equal(JSON.parse(body).buildSha, 'a'.repeat(40));
+  assert.equal(JSON.parse(body).configured, true);
+  for (const secret of [WORKER_TOKEN, TELEGRAM_UX_TOKEN, config.githubToken]) {
+    assert.equal(body.includes(secret), false);
+  }
+  const invalid = harness({ buildSha: 'not-a-sha' });
+  assert.equal((await (await invalid.fetch(new Request('https://worker.example/healthz'))).json() as Record<string, unknown>).buildSha, undefined);
 });
 
 test('claim отдаёт spec с ключом и гасит токен', async () => {

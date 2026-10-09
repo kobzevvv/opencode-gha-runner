@@ -8,8 +8,11 @@ import { parseRing } from './gateway/ring.js';
 import { KvRunStore, type KvLike } from './gateway/store.js';
 
 export interface Env {
+  BUILD_SHA?: string;
+  DEPLOYMENT_ENV?: string;
   RUNS: KvLike;
   WORKER_TOKEN: string;
+  WORKER_TOKEN_TELEGRAM_UX?: string;
   GITHUB_TOKEN: string;
   GITHUB_REPO: string;
   GITHUB_WORKFLOW?: string;
@@ -30,7 +33,10 @@ export default {
     // собирается на каждый вызов, а не один раз на уровне модуля.
     const app = createGateway({
       config: {
+        buildSha: env.BUILD_SHA,
+        sandbox3FreeOnly: env.DEPLOYMENT_ENV === 'sandbox3',
         workerToken: env.WORKER_TOKEN,
+        telegramUxWorkerToken: env.WORKER_TOKEN_TELEGRAM_UX,
         repo: env.GITHUB_REPO,
         workflow: env.GITHUB_WORKFLOW ?? 'run-agent.yml',
         ref: env.GITHUB_REF || undefined,

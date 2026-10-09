@@ -1,5 +1,17 @@
 # opencode-gha-runner
 
+## Isolated gateway component sandbox
+
+`npm run deploy:sandbox` deploys `opencode-gha-runner-gateway-sandbox` with a
+dedicated KV namespace. It targets the public test workflow repository and is not
+connected to Telegram or the Agent API. Set a sandbox-only `WORKER_TOKEN` using
+Wrangler secrets before running the live status probe. The probe's synthetic KV
+record is removed when it completes.
+
+Run `npm run smoke:sandbox-status -- <completed-github-actions-run-id>` to verify
+that a completed pre-claim workflow failure is surfaced as a failed run. This is a
+gateway component probe, not full Agent API/profile end-to-end acceptance.
+
 Внешний воркер Serverless Agent API: принимает `POST /v1/launch`, поднимает одноразовую
 джобу в GitHub Actions, запускает в ней агента opencode и возвращает результат в формате
 `LaunchResult`.
@@ -349,6 +361,11 @@ queued», а при параллельных запусках это мог бы
 
 ## Что нужно настроить в репозитории
 
+Если принятый запрос задаёт `engine.modelSettings.model`, раннер использует эту
+модель вместо `-m`/`--model` из `AGENT_ARGS`. Имя `free` означает `ladder/free`;
+полное имя с провайдером сохраняется. Без поля модели действуют настройки
+репозитория. Неправильный идентификатор отклоняется до диспатча.
+
 **Actions → General → Workflow permissions → Read and write**: не требуется, джоба пишет
 только через `ARTIFACTS_TOKEN`.
 
@@ -362,8 +379,11 @@ queued», а при параллельных запусках это мог бы
 | `GCS_WORKLOAD_PROVIDER`, `GCS_SERVICE_ACCOUNT` (variables) | Actions → Variables | WIF identity для `gcloud storage`; workflow выдаёт `id-token: write` и ставит Cloud SDK |
 | `AGENT_ARGS` (variable) | Actions → Variables | доп. флаги агенту, например `-m ladder/free` |
 
-`GITHUB_TOKEN` джобы для этого не годится: он ограничен одним репозиторием, а артефакты
-кладутся в репозиторий пользователя.
+`GITHUB_TOKEN` джобы для обычной публикации артефактов не годится: он ограничен
+репозиторием workflow, а артефакты могут быть в другом репозитории пользователя.
+Исключение — profile saveback: такие запуски не клонируют GitHub-репозиторий и не
+публикуют результаты обычным способом. Они загружают подписанный snapshot и отправляют
+изменения через одноразовую saveback capability Runner API; `ARTIFACTS_TOKEN` им не нужен.
 
 ## Развёрнутый шлюз
 
@@ -456,6 +476,21 @@ npx wrangler deploy
   наш API их прислал. Это проверяется тестом.
 
 ## Структура
+
+### Изолированный sandbox3
+
+`wrangler.sandbox3.jsonc` и `run-agent-sandbox3.yml` используют существующий
+native launcher с отдельным KV. Gateway принимает только профиль
+`integration-sandbox3-v1` со snapshot/saveback, принудительно выбирает
+`ladder/free` и ограничивает агента 180 секундами, вывод и лог — 1 MiB каждый.
+Джобы выполняются последовательно, с потолком 10 минут. Логи хранятся локально;
+дополнительная инфраструктура GCP не требуется. Это не квота диска.
+
+После CI и merge в main запустите `Deploy Native sandbox3 gateway` с секретами
+окружения `native-sandbox3`, описанными в AGENTS.md. Deployment закрепляет
+workflow за веткой `runtime/sandbox3/<SHA>` без перезаписи существующей ссылки.
+Проверка health и отказа анонимному запросу не запускает модель и не заменяет
+Telegram E2E.
 
 | Путь | Что |
 |---|---|

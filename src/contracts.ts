@@ -437,6 +437,16 @@ export function validateLaunchRequest(input: unknown): LaunchRequest {
     if (engine['adapterVersion'] !== ENGINE_ADAPTER_VERSION) {
       issues.push(`engine.adapterVersion: expected "${ENGINE_ADAPTER_VERSION}"`);
     }
+    if (engine['modelSettings'] !== undefined) {
+      const settings = engine['modelSettings'];
+      if (!isPlainObject(settings)) issues.push('engine.modelSettings: expected an object');
+      else {
+        if (settings['model'] !== undefined && (typeof settings['model'] !== 'string'
+          || !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,199}$/.test(settings['model']))) {
+          issues.push('engine.modelSettings.model: expected a model identifier');
+        }
+      }
+    }
   }
 
   if (!isPlainObject(req['input'])) {

@@ -1,0 +1,98 @@
+# Запуск агента opencode в одноразовой GHA-джобе.
+#
+# В inputs диспатча — только `run_id` и `claim_token`. Ни промпта, ни ключа LLM, ни
+# имени репозитория здесь быть не должно: `workflow_dispatch` публичного репозитория
+# показывает inputs в метаданных прогона, и всё, что туда попало, читает любой.
+# Всё остальное джоба забирает у шлюза одноразовым claim'ом (см. src/claim.ts).
+name: Native sandbox3 Agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Идентификатор рана (эхо в ответе шлюзу)
+        required: true
+        type: string
+      claim_token:
+        description: Одноразовый токен обмена на spec + llmKey. Глохнет после первого claim'а
+        required: true
+        type: string
+
+# Sandbox3 runs sequentially; an active accepted run is never auto-cancelled.
+concurrency:
+  group: native-sandbox3-agent
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    # Страховка сверху: `limits.timeoutMs` жмёт агента, а этот потолок — всю джобу
+    # вместе с клоном, установкой opencode и сохранением профиля.
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    env:
+      GCS_WORKLOAD_PROVIDER: ''
+      GCS_SERVICE_ACCOUNT: ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build and unit tests
+        run: npm ci --no-audit --no-fund && npm run build && npm test
+
+      # Аутентификация в GCP для выгрузки лога сессии. Workload Identity Federation:
+      # у секрета нет приватного ключа, только имя провайдера и сервис-аккаунта.
+      - name: Auth to Google Cloud
+        if: env.GCS_WORKLOAD_PROVIDER != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCS_WORKLOAD_PROVIDER }}
+          service_account: ${{ env.GCS_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        if: env.GCS_WORKLOAD_PROVIDER != ''
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          version: '>= 363.0.0'
+
+      # Бинарь ставится до создания идентичности и делается world-readable, чтобы
+      # агент мог его исполнить под своим UID, но не мог переписать.
+      - name: Install opencode
+        run: |
+          set -euo pipefail
+          npm install -g opencode-ai --no-audit --no-fund
+          sudo chmod -R a+rX "$(npm root -g)"
+          opencode --version
+
+      - name: Run agent
+        env:
+          GATEWAY_URL: https://trained-assist-native-worker-sandbox3.skillset-apply.workers.dev
+          RUN_ID: ${{ inputs.run_id }}
+          CLAIM_TOKEN: ${{ inputs.claim_token }}
+          ARTIFACTS_TOKEN: ''
+          LOG_UPLOAD: local
+          GCS_LOG_BUCKET: ''
+          GCS_PROFILE_BUCKET: ''
+          WORKSPACE_ROOT: ${{ runner.temp }}
+          AGENT_ARGS: '--pure -m ladder/free --format json'
+          AGENT_CONFIG: ''
+          # Passwordless sudo — штатное свойство GitHub-hosted раннера, поэтому
+          # per_run_unix_identity ставится по-настоящему, а не имитируется.
+          ALLOW_SUDO: 'true'
+        run: node dist/src/runner/main.js
+
+      - name: Publish session log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: session-log-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/session-logs/${{ inputs.run_id }}/session.log
+          retention-days: 3
+          if-no-files-found: ignore

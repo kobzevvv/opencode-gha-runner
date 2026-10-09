@@ -8,8 +8,10 @@ the machine is decommissioned when the job finishes. See [GitHub-hosted runners]
 The workflow still creates a per-run Unix identity so agent processes and profile files
 are isolated within the job.
 
-There is currently no declared disposable end-to-end API/Worker environment for profile
-saveback. The real GHA profile write/read-after-write path is therefore **not proven**.
+The GHA gateway has a dedicated component sandbox (`opencode-gha-runner-gateway-sandbox`)
+for isolated status reconciliation probes. It is not connected to a disposable Agent
+API/profile environment. The real GHA profile write/read-after-write path is therefore
+**not proven**.
 Do not use a production API or profile as a substitute. The cross-repository sandbox gap
 is tracked in [ai-agent-runner issue #173](https://github.com/trained-assist/ai-agent-runner/issues/173).
 

@@ -31,7 +31,7 @@ jobs:
         id: auth
         with:
           workload_identity_provider: ${{ vars.GCS_WORKLOAD_PROVIDER }}
-          service_account: ${{ vars.GCS_SERVICE_ACCOUNT }}
+          service_account: ${{ vars.GCS_PROVISION_SERVICE_ACCOUNT || vars.GCS_SERVICE_ACCOUNT }}
           token_format: access_token
       - name: Provision through existing Google IAM APIs
         env:

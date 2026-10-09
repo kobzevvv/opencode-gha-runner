@@ -58,3 +58,7 @@ creation/write responses require reconciliation; never erase keys or blindly
 regenerate credentials. Artifacts contain metadata only. A saved credential
 does not prove storage or Runner readiness; verify the consumer's exact
 identity contract and object/signing round trip before native configuration.
+If an existing platform provisioning identity already has the required IAM
+rights, set `GCS_PROVISION_SERVICE_ACCOUNT` for this workflow and authorize its
+use through the existing WIF provider. The ordinary native jobs continue using
+`GCS_SERVICE_ACCOUNT`; provisioning privileges are not passed to agent jobs.

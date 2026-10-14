@@ -1,4 +1,5 @@
 name = "opencode-gha-runner-gateway"
+account_id = "d740a05e9442c1d0feacae2dfc673e93"
 main = "dist/src/worker.js"
 compatibility_date = "2024-12-30"
 workers_dev = true

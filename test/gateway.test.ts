@@ -15,10 +15,12 @@ import { validLaunchRequest } from './contracts.test.js';
 
 const WORKER_TOKEN = 'worker-token-for-tests';
 const TELEGRAM_UX_TOKEN = 'telegram-ux-token-for-tests';
+const SANDBOX_CLIENT_TOKEN = 'sandbox-client-token-for-tests';
 const API_RESULT_URL = 'https://api.example/v1/worker/launches/run_x/result';
 const config: GatewayConfig = {
   workerToken: WORKER_TOKEN,
   telegramUxWorkerToken: TELEGRAM_UX_TOKEN,
+  workerClientTokens: { sandbox3_agent_api: SANDBOX_CLIENT_TOKEN },
   repo: 'vovalikessmoothy-png/opencode-gha-runner',
   workflow: 'run-agent.yml',
   publicBaseUrl: 'https://worker.example',
@@ -205,6 +207,36 @@ test('дополнительный ключ изолирован по ранам
     repo: { fullName: 'owner/name', branch: 'main', commit: 'a'.repeat(40) },
   }, claim.reportToken));
   assert.equal(h.delivered.at(-1)?.auth, `Bearer ${TELEGRAM_UX_TOKEN}`);
+});
+
+test('именованный клиентский ключ изолирует sandbox-раны и сохраняется для callback', async () => {
+  const h = harness();
+  const runId = 'run_sandbox3_client_01';
+  const request = spec({ runId, operationId: 'op_sandbox3_client_01' });
+  assert.equal((await h.fetch(launch(request, SANDBOX_CLIENT_TOKEN))).status, 202);
+  assert.equal((await h.store.get(runId))?.credentialId, 'client:sandbox3_agent_api');
+  assert.equal((await h.fetch(get(`/v1/runs/${runId}/status`, WORKER_TOKEN))).status, 404);
+  assert.equal((await h.fetch(get(`/v1/runs/${runId}/status`, SANDBOX_CLIENT_TOKEN))).status, 200);
+
+  const claim = await h.fetch(post('/v1/claim', { runId }, h.dispatched.at(-1)!.claimToken));
+  const reportToken = ((await claim.json()) as { reportToken: string }).reportToken;
+  await h.fetch(post(`/v1/runs/${runId}/report`, {
+    status: 'succeeded', exitCode: 0, exitSignal: null, exitReason: 'completed', stdout: '', stderr: '',
+    answerSource: 'engine_stdout', durationMs: 10, timedOut: false, outputTruncated: false, artifacts: [], logUrl: '',
+    repo: { fullName: 'owner/name', branch: 'main', commit: 'a'.repeat(40) },
+  }, reportToken));
+  assert.equal(h.delivered.at(-1)?.auth, `Bearer ${SANDBOX_CLIENT_TOKEN}`);
+});
+
+test('gateway rejects duplicate or weak named client credentials', () => {
+  assert.throws(() => createGateway({
+    config: { ...config, workerClientTokens: { sandbox4_agent_api: WORKER_TOKEN } },
+    store: new MemoryRunStore(),
+  }), /distinct values/);
+  assert.throws(() => createGateway({
+    config: { ...config, workerClientTokens: { sandbox4_agent_api: 'short' } },
+    store: new MemoryRunStore(),
+  }), /at least 24 characters/);
 });
 
 test('launch с некорректным телом — 400 со списком проблем', async () => {

@@ -35,6 +35,8 @@ export interface GatewayConfig {
   workerToken: string;
   /** Optional isolated client credential for the Telegram UX sandbox. */
   telegramUxWorkerToken?: string;
+  /** Independently revocable client credentials keyed by stable client ID. */
+  workerClientTokens?: Record<string, string>;
   /** Репозиторий с workflow: `owner/name`. */
   repo: string;
   /** Файл workflow, например `run-agent.yml`. */
@@ -119,6 +121,12 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  */
 export function createGateway(deps: GatewayDeps): { fetch: (request: Request) => Promise<Response> } {
   const { config, store } = deps;
+  const clientEntries = Object.entries(config.workerClientTokens ?? {});
+  const allCredentials = [config.workerToken, config.telegramUxWorkerToken, ...clientEntries.map(([, token]) => token)].filter(Boolean);
+  if (clientEntries.some(([id, token]) => !/^[a-z][a-z0-9_]{2,47}$/.test(id) || token.length < 24)
+    || new Set(allCredentials).size !== allCredentials.length) {
+    throw new Error('worker client credentials must have valid IDs, at least 24 characters, and distinct values');
+  }
   const randomToken = deps.randomToken ?? defaultRandomToken;
   const now = deps.now ?? (() => Date.now());
   const workflowStatusRefreshMs = deps.workflowStatusRefreshMs ?? 30_000;
@@ -192,31 +200,40 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     }
   }
 
-  function workerCredential(request: Request): 'primary' | 'telegram_ux' | null {
+  function workerCredential(request: Request): string | null {
     const token = bearer(request);
     if (!token) return null;
     if (timingSafeEqual(token, config.workerToken)) return 'primary';
     if (config.telegramUxWorkerToken && timingSafeEqual(token, config.telegramUxWorkerToken)) return 'telegram_ux';
+    for (const [clientId, clientToken] of Object.entries(config.workerClientTokens ?? {})) {
+      if (clientId && clientToken && timingSafeEqual(token, clientToken)) return `client:${clientId}`;
+    }
     return null;
   }
 
-  function requireWorkerAuth(request: Request): { credentialId: 'primary' | 'telegram_ux' } | Response {
+  function requireWorkerAuth(request: Request): { credentialId: string } | Response {
     const credentialId = workerCredential(request);
     return credentialId
       ? { credentialId }
       : json({ error: 'unauthorized' }, 401, noStore({ 'www-authenticate': 'Bearer' }));
   }
 
-  function credentialToken(credentialId: 'primary' | 'telegram_ux' | undefined): string {
-    return credentialId === 'telegram_ux' ? config.telegramUxWorkerToken! : config.workerToken;
+  function credentialToken(credentialId: string | undefined): string {
+    if (credentialId === 'telegram_ux') return config.telegramUxWorkerToken!;
+    if (credentialId?.startsWith('client:')) {
+      const token = config.workerClientTokens?.[credentialId.slice('client:'.length)];
+      if (token) return token;
+      throw new Error('run client credential has been revoked');
+    }
+    return config.workerToken;
   }
 
-  function ownsRun(run: StoredRun, credentialId: 'primary' | 'telegram_ux'): boolean {
+  function ownsRun(run: StoredRun, credentialId: string): boolean {
     // Pre-existing KV records predate credential IDs and belong to the primary key.
     return (run.credentialId ?? 'primary') === credentialId;
   }
 
-  async function handleLaunch(request: Request, credentialId: 'primary' | 'telegram_ux'): Promise<Response> {
+  async function handleLaunch(request: Request, credentialId: string): Promise<Response> {
     const spec = validateLaunchRequest(await readJson(request));
 
     // Дедупликация по operationId, а не по runId: наш API повторяет доставку того же
@@ -386,7 +403,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
    * результат уже лежит у нас, и API заберёт его опросом. Молча терять нельзя — поэтому
    * в лог уходит причина без тела результата.
    */
-  async function deliverToApi(resultUrl: string, result: LaunchResult, credentialId?: 'primary' | 'telegram_ux'): Promise<void> {
+  async function deliverToApi(resultUrl: string, result: LaunchResult, credentialId?: string): Promise<void> {
     const fetchImpl = deps.fetchImpl ?? fetch.bind(globalThis);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {

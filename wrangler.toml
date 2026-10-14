@@ -12,6 +12,8 @@ id = "c1eb5647663b429f8f1e913b5353bd55"
 # Секреты задаются через `wrangler secret put`, а не в этом файле:
 #   wrangler secret put WORKER_TOKEN
 #   wrangler secret put GITHUB_TOKEN
+# Клиентские ключи изолируются по именам раннера:
+#   WORKER_CLIENT_TOKEN_<CLIENT_ID> (например WORKER_CLIENT_TOKEN_SANDBOX3_AGENT_API)
 # Переменные (не секреты) — в wrangler.toml или через `wrangler secret put`:
 #   GITHUB_REPO       owner/name репозитория с workflow
 #   GITHUB_WORKFLOW   run-agent.yml

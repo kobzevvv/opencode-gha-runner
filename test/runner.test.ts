@@ -466,6 +466,40 @@ test('remote MCP попадает в конфиг, а токен остаётс�
   assert.ok(!rendered.includes('rt_'), 'самого токена в конфиге быть не должно — только ссылка на env');
 });
 
+test('shared MCP proof contract headers and secret bindings reach the agent unchanged', { skip: !process.env['MCP_RUN_PROOF_CONTRACT'] }, () => {
+  const contract = JSON.parse(readFileSync(process.env['MCP_RUN_PROOF_CONTRACT']!, 'utf8')) as {
+    runId: { acceptedExamples: string[] };
+    testTool: { tool: string; scope: string };
+    transport: { operationHeader: string; operationValue: string; scopeHeader: string; runIdHeader: string; taskIdHeader: string; proofHeader: string };
+  };
+  for (const runId of contract.runId.acceptedExamples) {
+    const proofReference = '{env:RUNNER_MCP_REGISTRY_TEST_PROOF}';
+    const headers = {
+      Authorization: 'Bearer {env:RUNNER_MCP_REGISTRY_TEST}',
+      [contract.transport.operationHeader]: contract.transport.operationValue,
+      [contract.transport.scopeHeader]: contract.testTool.scope,
+      [contract.transport.runIdHeader]: runId,
+      [contract.transport.taskIdHeader]: 'task_contract_fixture',
+      [contract.transport.proofHeader]: proofReference,
+    };
+    const rendered = renderAgentConfig(readFileSync(AGENT_CONFIG_TEMPLATE, 'utf8'), {
+      llmKeyEnvName: 'LLM_LADDER_TOKEN',
+      mcpServers: { registry: { type: 'remote', url: 'https://mcp.example/mcp', headers, allowedTools: [contract.testTool.tool] } },
+    });
+    const config = JSON.parse(rendered) as { mcp: Record<string, { headers: Record<string, string> }> };
+    assert.deepEqual(config.mcp['registry']?.headers, headers);
+    assert.ok(rendered.includes(proofReference));
+    assert.ok(!rendered.includes('synthetic-signed-proof'), 'proof values are referenced through the run environment');
+    const env = resolveAgentEnv({
+      envAllowlist: ['PATH'], env: { PATH: '/usr/bin' }, identityHome: '/home/ocrun-test',
+      llmKeyEnvName: 'LLM_LADDER_TOKEN', llmKey: '',
+      injectedSecrets: { RUNNER_MCP_REGISTRY_TEST: 'synthetic-test-bearer', RUNNER_MCP_REGISTRY_TEST_PROOF: 'synthetic-signed-proof' },
+    });
+    assert.equal(env['RUNNER_MCP_REGISTRY_TEST_PROOF'], 'synthetic-signed-proof');
+    assert.equal(env['RUNNER_MCP_REGISTRY_TEST'], 'synthetic-test-bearer');
+  }
+});
+
 test('user MCP catalog uses canonical mem-gpt OpenCode tool IDs', () => {
   const rendered = renderAgentConfig(readFileSync(AGENT_CONFIG_TEMPLATE, 'utf8'), {
     llmKeyEnvName: 'K',

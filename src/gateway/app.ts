@@ -28,7 +28,7 @@ import {
 } from '../contracts.js';
 import { DispatchError, GitHubClient, type GitHubClientOptions } from './github.js';
 import { Ring, type RingTarget } from './ring.js';
-import { isTerminal, workerStatus, type KvLike, type RunStore, type StoredRun } from './store.js';
+import { isTerminal, RUN_TTL_SECONDS, workerStatus, type KvLike, type RunStore, type StoredRun } from './store.js';
 
 export interface GatewayConfig {
   /** Общий секрет между нашим API и воркером (`Authorization: Bearer`). */
@@ -119,7 +119,10 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * `launch` — это 202 с `status: "started"` и ссылкой для poll'а; финальный
  * `LaunchResult` наш API забирает через `GET /v1/runs/{runId}`.
  */
-export function createGateway(deps: GatewayDeps): { fetch: (request: Request) => Promise<Response> } {
+export function createGateway(deps: GatewayDeps): {
+  fetch: (request: Request) => Promise<Response>;
+  reconcileActive: () => Promise<void>;
+} {
   const { config, store } = deps;
   const clientEntries = Object.entries(config.workerClientTokens ?? {});
   const allCredentials = [config.workerToken, config.telegramUxWorkerToken, ...clientEntries.map(([, token]) => token)].filter(Boolean);
@@ -140,7 +143,7 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
   const clientFor = (target: RingTarget): GitHubClient => {
     if (deps.githubFor) return deps.githubFor(target);
     if (deps.github) return deps.github;
-    const key = `${target.repo}\n${target.token}`;
+    const key = `${target.repo}\n${workflowFor(target)}\n${target.token}`;
     let client = clientCache.get(key);
     if (!client) {
       client = new GitHubClient({
@@ -258,7 +261,8 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
 
     const claimToken = randomToken();
     const reportToken = randomToken();
-    await store.create({
+    try {
+      await store.create({
       credentialId,
       runId: spec.runId,
       operationId: spec.operationId,
@@ -271,7 +275,18 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
       claimToken,
       reportToken,
       result: null,
-    });
+      });
+    } catch (cause) {
+      // The operationId constraint is the atomic deduplication backstop when two
+      // identical launch requests pass the read above at the same time.
+      const raced = await store.findByOperationId(spec.operationId);
+      if (raced) {
+        if (!ownsRun(raced, credentialId)) return json({ error: 'operation_id_conflict' }, 409, noStore());
+        log('launch deduplicated after concurrent create', { runId: raced.runId, operationId: raced.operationId });
+        return json(receipt(raced), 202, noStore());
+      }
+      throw cause;
+    }
 
     log('dispatching run', {
       runId: spec.runId,
@@ -281,7 +296,6 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     });
 
     // Момент до диспатча: по нему ищем прогон, если ответ потеряется.
-    const dispatchStartedAt = now();
     try {
       const dispatched = await github.dispatchWorkflow({ runId: spec.runId, claimToken });
       await store.patch(spec.runId, { phase: 'dispatched', githubRunId: dispatched.runId });
@@ -292,17 +306,30 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
       // заведомо нет. Снимаем запись, чтобы повтор с тем же operationId не
       // задедуплицировался в мёртвый ран, и повтор диспатчит заново.
       if (!rejected) {
-        // Ответа не было или пришёл 5xx: диспатч **мог** пройти. Прежде чем забывать
-        // ран, спрашиваем GitHub, появился ли прогон. Иначе повтор поднял бы вторую
-        // GHA-джобу там, где первая уже работает, — ровно тот дефект, который
-        // дедупликация по operationId обязана исключать.
-        const adopted = await github.findRunSince(dispatchStartedAt).catch(() => null);
+        // Ответа не было или пришёл 5xx: диспатч мог пройти. Adopt only a workflow
+        // whose display title carries this exact runId; time-window guesses can bind
+        // another concurrent launch to this record.
+        const adopted = (await github.findRunsForRunIds([spec.runId]).catch(() => new Map()))
+          .get(spec.runId) ?? null;
         if (adopted) {
           await store.patch(spec.runId, { phase: 'dispatched', githubRunId: adopted.id });
           log('dispatch recovered after a lost response', { runId: spec.runId, githubRunId: adopted.id });
           const recovered = await store.get(spec.runId);
           if (recovered) return json(receipt(recovered), 202, noStore());
         }
+        // No exact match yet is not proof that the dispatch failed. Keep the queued
+        // identity for scheduled reconciliation and prevent a retry from duplicating it.
+        log('dispatch outcome remains ambiguous; preserving run record', { runId: spec.runId, operationId: spec.operationId });
+        const safeSummary = redact(cause instanceof Error ? cause.message : String(cause));
+        return json(
+          {
+            runId: spec.runId,
+            status: 'failed',
+            failure: failure('WORKER_INTERNAL', 'engine', `workflow_dispatch outcome is unknown: ${safeSummary}`),
+          },
+          502,
+          noStore(),
+        );
       }
 
       await store.remove(spec.runId);
@@ -395,10 +422,17 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
     // `runId` в теле игнорируется: эхом всегда идёт значение из пути.
     const result: LaunchResult = { ...(body as LaunchResult), runId };
     const accepted = await store.complete(runId, token, result);
-    log('run result accepted', { runId, accepted, exitReason: result.exitReason });
+    const persisted = accepted ? await store.get(runId) : null;
+    const persistedResult = persisted?.result;
+    log('run result accepted', { runId, accepted, exitReason: persistedResult?.exitReason ?? result.exitReason });
 
-    await deliverToApi(stored.request.resultUrl, result, stored.credentialId);
-    return json({ runId, status: 'accepted', exitReason: result.exitReason }, 200, noStore());
+    if (!accepted || !persisted || !persistedResult) {
+      return json({ error: 'report_not_persisted' }, 503, noStore());
+    }
+    // A duplicate report must forward the canonical first persisted result, never a
+    // later body that raced with or contradicted it.
+    await deliverToApi(persisted.request.resultUrl, persistedResult, persisted.credentialId);
+    return json({ runId, status: 'accepted', exitReason: persistedResult.exitReason }, 200, noStore());
   }
 
   /**
@@ -494,16 +528,14 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
 
   /** `GET /v1/runs/{runId}/status` — контрактный статус, без результата. */
   async function handleRunStatus(runId: string): Promise<Response> {
-    let run = await store.get(runId);
+    const run = await store.get(runId);
     // Неизвестный ран — это `unknown`, а не 404: исход установить нельзя, и наш API
     // должен пойти в reconcile, а не решить, что запуска не было.
     if (!run) {
       return json({ runId, status: 'unknown', updatedAt: new Date(now()).toISOString() }, 200, noStore());
     }
-    await reconcileUnclaimedWorkflow(run);
-    run = await store.get(runId) ?? run;
     return json(
-      { runId, status: workerStatus(run), updatedAt: new Date(run.updatedAt).toISOString() },
+      { runId, status: workerStatus(run, now()), updatedAt: new Date(run.updatedAt).toISOString() },
       200,
       noStore(),
     );
@@ -565,6 +597,34 @@ async function handleCancel(runId: string): Promise<Response> {
   }
 
   return {
+    reconcileActive: async (): Promise<void> => {
+      // Reconciliation is deliberately out of the status read path. A scheduled
+      // worker can recover lost callbacks without making GET requests mutate runs.
+      await store.pruneTerminalBefore?.(now() - RUN_TTL_SECONDS * 1000);
+      const active = await store.listActive();
+      const queued = active.filter((run) => run.phase === 'queued')
+        .sort((a, b) => a.createdAt - b.createdAt).slice(0, 100);
+      const queuedByClient = new Map<GitHubClient, StoredRun[]>();
+      for (const run of queued) {
+        const client = clientFor(run.target);
+        queuedByClient.set(client, [...(queuedByClient.get(client) ?? []), run]);
+      }
+      for (const [client, queued] of queuedByClient) {
+        const recovered = await client.findRunsForRunIds(queued.map((run) => run.runId)).catch((cause) => {
+          log('queued run reconciliation lookup failed', { count: queued.length,
+            error: redact(cause instanceof Error ? cause.message : String(cause)) });
+          return new Map<string, { id: number }>();
+        });
+        for (const run of queued) {
+          const workflow = recovered.get(run.runId);
+          if (!workflow) continue;
+          await store.patch(run.runId, { phase: 'dispatched', githubRunId: workflow.id });
+        }
+      }
+      const dispatched = active.filter((run) => run.phase === 'dispatched')
+        .sort((a, b) => a.createdAt - b.createdAt).slice(0, 100);
+      for (const run of dispatched) await reconcileUnclaimedWorkflow(run);
+    },
     fetch: async (request: Request): Promise<Response> => {
       const url = new URL(request.url);
       const path = url.pathname.replace(/\/+$/, '') || '/';

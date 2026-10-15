@@ -19,11 +19,26 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Check out canonical MCP proof contract
+        uses: actions/checkout@v4
+        with:
+          repository: trained-assist/trained-assist-mcp-host
+          ref: main
+          path: mcp-host-contract
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
+      - name: Enable the canonical MCP proof fixture when published
+        env:
+          MCP_HOST_CONTRACT_PATH: ${{ github.workspace }}/mcp-host-contract/contracts/runner-mcp-proof/v1/contract.json
+        run: |
+          if [[ -f "$MCP_HOST_CONTRACT_PATH" ]]; then
+            printf 'MCP_RUN_PROOF_CONTRACT=%s\n' "$MCP_HOST_CONTRACT_PATH" >> "$GITHUB_ENV"
+          else
+            echo 'MCP Host main does not publish the proof fixture yet; the gated cross-repository contract test will skip.' >> "$GITHUB_STEP_SUMMARY"
+          fi
       - run: npm run verify
       - name: Verify OpenCode provisioning from the attested VM release
         env:

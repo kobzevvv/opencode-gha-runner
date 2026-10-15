@@ -52,6 +52,24 @@ export interface StoredRun {
   result: LaunchResult | null;
 }
 
+function clearCompletedRunSecrets(run: StoredRun): StoredRun {
+  return {
+    ...run,
+    claimToken: '',
+    request: {
+      ...run.request,
+      input: { inlinePrompt: '' },
+      env: {},
+      credentials: undefined,
+      mcp: undefined,
+      mcpSecrets: undefined,
+      publicationToken: undefined,
+      profileWorkspace: undefined,
+    },
+    target: { repo: run.target.repo, token: '' },
+  };
+}
+
 export interface RunStore {
   create(run: StoredRun): Promise<void>;
   get(runId: string): Promise<StoredRun | null>;
@@ -69,6 +87,8 @@ export interface RunStore {
   patch(runId: string, patch: Partial<Pick<StoredRun, 'phase' | 'githubRunId'>>): Promise<void>;
   /** Все не завершённые раны — воркер держит их в памяти для отмены. */
   listActive(): Promise<StoredRun[]>;
+  /** Prune only terminal projections; ambiguous active runs are never age-deleted. */
+  pruneTerminalBefore?(updatedAt: number): Promise<void>;
 }
 
 /**
@@ -80,7 +100,7 @@ export interface RunStore {
  *
  * `done` раскрывается по `exitReason`: `cancelled` — отдельный статус, а не `failed`.
  */
-export function workerStatus(run: StoredRun): WorkerRunStatus {
+export function workerStatus(run: StoredRun, nowMs = Date.now()): WorkerRunStatus {
   if (run.phase === 'done') {
     const exitReason = run.result?.exitReason;
     if (exitReason === 'cancelled') return 'cancelled';
@@ -89,6 +109,7 @@ export function workerStatus(run: StoredRun): WorkerRunStatus {
     return exitReason === 'completed' ? 'succeeded' : 'failed';
   }
   if (run.phase === 'claimed' || run.phase === 'running') return 'running';
+  if (run.phase === 'queued' && nowMs - run.createdAt >= AMBIGUOUS_QUEUED_RUN_MS) return 'unknown';
   return 'accepted';
 }
 
@@ -145,8 +166,7 @@ export class MemoryRunStore implements RunStore {
     run.updatedAt = Date.now();
     // Ключ LLM больше не нужен: джоба получила его на claim, результат она уже послала.
     // Токен цели — тоже: отменять и искать уже нечего.
-    run.request = { ...run.request, env: {}, credentials: undefined, publicationToken: undefined, profileWorkspace: undefined };
-    run.target = { repo: run.target.repo, token: '' };
+    Object.assign(run, clearCompletedRunSecrets(run));
     return true;
   }
 
@@ -179,6 +199,7 @@ export const operationKey = (operationId: string): string => `op:${operationId}`
 
 /** TTL рана: холодный старт GHA — 15–45 с, но очередь на бесплатных тарифах бывает длиннее. */
 export const RUN_TTL_SECONDS = 60 * 60 * 6;
+export const AMBIGUOUS_QUEUED_RUN_MS = 2 * 60 * 1000;
 
 export class KvRunStore implements RunStore {
   constructor(
@@ -224,8 +245,7 @@ export class KvRunStore implements RunStore {
     run.result = result;
     run.phase = 'done';
     run.updatedAt = Date.now();
-    run.request = { ...run.request, env: {}, credentials: undefined, publicationToken: undefined, profileWorkspace: undefined };
-    run.target = { repo: run.target.repo, token: '' };
+    Object.assign(run, clearCompletedRunSecrets(run));
     await this.kv.put(runKey(runId), JSON.stringify(run), { expirationTtl: this.ttlSeconds });
     return true;
   }
@@ -246,5 +266,170 @@ export class KvRunStore implements RunStore {
       .filter((raw): raw is string => typeof raw === 'string')
       .map((raw) => JSON.parse(raw) as StoredRun)
       .filter((run) => run.phase !== 'done');
+  }
+}
+
+/** Minimal Cloudflare D1 surface; kept structural so Node tests need no Workers runtime. */
+export interface D1StatementLike {
+  bind(...values: unknown[]): D1StatementLike;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+  all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
+  run(): Promise<unknown>;
+}
+
+export interface D1Like {
+  prepare(query: string): D1StatementLike;
+  batch(statements: D1StatementLike[]): Promise<{ meta?: { changes?: number } }[]>;
+}
+
+type RunRow = { run_json: string };
+const phaseRank: Record<RunPhase, number> = { queued: 0, dispatched: 1, claimed: 2, running: 3, done: 4 };
+
+/**
+ * D1-backed run projection plus an append-only, secret-free lifecycle journal.
+ * Each state transition and its journal row are committed in one D1 batch.
+ */
+export class D1RunStore implements RunStore {
+  constructor(private readonly db: D1Like, private readonly legacy?: RunStore) {}
+
+  private async current(runId: string): Promise<StoredRun | null> {
+    const row = await this.db.prepare(`SELECT run_json FROM gateway_runs WHERE run_id = ?
+      AND (phase != 'done' OR updated_at >= ?)`).bind(runId, Date.now() - RUN_TTL_SECONDS * 1000).first<RunRow>();
+    if (row) return JSON.parse(row.run_json) as StoredRun;
+    return this.legacy?.get(runId) ?? null;
+  }
+
+  private async fromD1(runId: string): Promise<StoredRun | null> {
+    const row = await this.db.prepare(`SELECT run_json FROM gateway_runs WHERE run_id = ?
+      AND (phase != 'done' OR updated_at >= ?)`).bind(runId, Date.now() - RUN_TTL_SECONDS * 1000).first<RunRow>();
+    return row ? JSON.parse(row.run_json) as StoredRun : null;
+  }
+
+  async create(run: StoredRun): Promise<void> {
+    const identity = run.request;
+    const eventKey = 'created';
+    await this.db.batch([
+      this.db.prepare(`INSERT INTO gateway_runs
+        (run_id, user_task_id, operation_id, job_id, profile_id, conversation_id, owner_generation,
+         phase, created_at, updated_at, github_run_id, claim_token, report_token, run_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(run.runId, identity.userTaskId, run.operationId, identity.jobId, identity.profileId,
+          identity.conversationId, identity.ownerGeneration, run.phase, run.createdAt, run.updatedAt,
+          run.githubRunId, run.claimToken, run.reportToken, JSON.stringify(run)),
+      this.eventInsert(run, eventKey, 'created', run.phase, run.updatedAt),
+    ]);
+  }
+
+  private eventInsert(run: StoredRun, eventKey: string, kind: string, phase: RunPhase, at: number): D1StatementLike {
+    return this.db.prepare(`INSERT INTO gateway_run_events
+      (run_id, event_key, user_task_id, operation_id, job_id, profile_id, conversation_id,
+       owner_generation, github_run_id, event_type, phase, occurred_at)
+      SELECT run_id, ?, user_task_id, operation_id, job_id, profile_id, conversation_id,
+       owner_generation, github_run_id, ?, phase, updated_at FROM gateway_runs
+       WHERE run_id = ? AND phase = ? AND updated_at = ?`)
+      .bind(eventKey, kind, run.runId, phase, at);
+  }
+
+  async get(runId: string): Promise<StoredRun | null> { return this.current(runId); }
+
+  async findByOperationId(operationId: string): Promise<StoredRun | null> {
+    const row = await this.db.prepare(`SELECT run_json FROM gateway_runs WHERE operation_id = ?
+      AND (phase != 'done' OR updated_at >= ?)`).bind(operationId, Date.now() - RUN_TTL_SECONDS * 1000).first<RunRow>();
+    return row ? JSON.parse(row.run_json) as StoredRun : this.legacy?.findByOperationId(operationId) ?? null;
+  }
+
+  async remove(runId: string): Promise<void> {
+    const run = await this.db.prepare('SELECT run_json FROM gateway_runs WHERE run_id = ?').bind(runId).first<RunRow>();
+    if (!run) { await this.legacy?.remove(runId); return; }
+    // Explicit dispatch rejection only: remove the live projection so this operationId
+    // can be retried, but retain the sanitized event history for diagnosis.
+    await this.db.batch([
+      this.db.prepare(`INSERT INTO gateway_run_events
+        (run_id, event_key, user_task_id, operation_id, job_id, profile_id, conversation_id,
+         owner_generation, github_run_id, event_type, phase, occurred_at)
+        SELECT run_id, 'dispatch_rejected', user_task_id, operation_id, job_id, profile_id,
+         conversation_id, owner_generation, github_run_id, 'dispatch_rejected', phase, ?
+        FROM gateway_runs WHERE run_id = ?`).bind(Date.now(), runId),
+      this.db.prepare('DELETE FROM gateway_runs WHERE run_id = ?').bind(runId),
+    ]);
+  }
+
+  async claim(runId: string, token: string): Promise<StoredRun | null> {
+    const run = await this.fromD1(runId);
+    if (!run) return this.legacy?.claim(runId, token) ?? null;
+    if (!run || run.claimToken !== token || run.phase === 'done' || run.phase === 'claimed' || run.phase === 'running') return null;
+    if (run.phase !== 'queued' && run.phase !== 'dispatched') return null;
+    const at = Math.max(Date.now(), run.updatedAt + 1);
+    const next = { ...run, phase: 'claimed' as const, updatedAt: at };
+    try {
+      const batch = await this.db.batch([
+        this.db.prepare(`UPDATE gateway_runs SET phase = 'claimed', updated_at = ?, run_json = ?
+          WHERE run_id = ? AND claim_token = ? AND phase IN ('queued', 'dispatched')`)
+          .bind(at, JSON.stringify(next), runId, token),
+        this.eventInsert(next, 'claim', 'claimed', 'claimed', at),
+      ]);
+      if ((batch[0]?.meta?.changes ?? 0) !== 1) return null;
+      return await this.get(runId);
+    } catch {
+      // A concurrent claim may win between the read and conditional update.
+      return null;
+    }
+  }
+
+  async complete(runId: string, token: string, result: LaunchResult): Promise<boolean> {
+    const run = await this.fromD1(runId);
+    if (!run) return this.legacy?.complete(runId, token, result) ?? false;
+    if (!run || run.reportToken !== token) return false;
+    if (run.phase === 'done') return true;
+    const at = Math.max(Date.now(), run.updatedAt + 1);
+    const next = clearCompletedRunSecrets({ ...run, phase: 'done', updatedAt: at, result: structuredClone(result) });
+    try {
+      await this.db.batch([
+        this.db.prepare(`UPDATE gateway_runs SET phase = 'done', updated_at = ?, run_json = ?,
+          claim_token = '', report_token = '' WHERE run_id = ? AND report_token = ? AND phase != 'done'`)
+          .bind(at, JSON.stringify(next), runId, token),
+        this.eventInsert(next, 'completed', 'completed', 'done', at),
+      ]);
+      const saved = await this.get(runId);
+      return saved?.phase === 'done';
+    } catch {
+      // Duplicate reports are successful no-ops; a lost/failed first report stays retryable.
+      const saved = await this.get(runId);
+      return saved?.phase === 'done';
+    }
+  }
+
+  async patch(runId: string, patch: Partial<Pick<StoredRun, 'phase' | 'githubRunId'>>): Promise<void> {
+    const run = await this.fromD1(runId);
+    if (!run) { await this.legacy?.patch(runId, patch); return; }
+    const requestedPhase = patch.phase === 'done' ? undefined : patch.phase;
+    const phase = requestedPhase && phaseRank[requestedPhase] > phaseRank[run.phase] ? requestedPhase : run.phase;
+    const githubRunId = run.githubRunId ?? patch.githubRunId ?? null;
+    if (phase === run.phase && githubRunId === run.githubRunId) return;
+    const at = Math.max(Date.now(), run.updatedAt + 1);
+    const next = { ...run, phase, githubRunId, updatedAt: at };
+    const eventKey = `transition:${phase}:${githubRunId ?? 'none'}`;
+    await this.db.batch([
+      this.db.prepare(`UPDATE gateway_runs SET phase = ?, github_run_id = ?, updated_at = ?, run_json = ?
+        WHERE run_id = ? AND phase != 'done' AND
+        CASE phase WHEN 'queued' THEN 0 WHEN 'dispatched' THEN 1 WHEN 'claimed' THEN 2 WHEN 'running' THEN 3 ELSE 4 END <= ?
+        AND (phase != ? OR github_run_id IS NOT ?)`)
+        .bind(phase, githubRunId, at, JSON.stringify(next), runId, phaseRank[phase], phase, githubRunId),
+      this.eventInsert(next, eventKey, 'transition', phase, at),
+    ]);
+  }
+
+  async listActive(): Promise<StoredRun[]> {
+    const { results } = await this.db.prepare(`SELECT run_json FROM gateway_runs WHERE phase != 'done'`).all<RunRow>();
+    const runs = results.map(({ run_json }) => JSON.parse(run_json) as StoredRun);
+    if (this.legacy) {
+      const known = new Set(runs.map((run) => run.runId));
+      for (const run of await this.legacy.listActive()) if (!known.has(run.runId)) runs.push(run);
+    }
+    return runs;
+  }
+
+  async pruneTerminalBefore(updatedAt: number): Promise<void> {
+    await this.db.prepare(`DELETE FROM gateway_runs WHERE phase = 'done' AND updated_at < ?`).bind(updatedAt).run();
   }
 }

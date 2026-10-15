@@ -30,6 +30,7 @@ const config: GatewayConfig = {
 
 interface Harness {
   fetch: (request: Request) => Promise<Response>;
+  reconcileActive: () => Promise<void>;
   store: MemoryRunStore;
   dispatched: Array<{ runId: string; claimToken: string }>;
   cancelled: number[];
@@ -46,6 +47,7 @@ function harness(options: {
   workflowState?: { status: string; conclusion: string | null } | null;
   workflowStatusRefreshMs?: number;
   deliveryStatus?: number;
+  clock?: () => number;
 } = {}): Harness {
   const store = new MemoryRunStore();
   const dispatched: Array<{ runId: string; claimToken: string }> = [];
@@ -53,7 +55,6 @@ function harness(options: {
   const workflowStatusLookups: number[] = [];
   const delivered: Array<{ url: string; auth: string | null; body: unknown }> = [];
   let counter = 0;
-  let findRunSinceCalls = 0;
 
   const github = {
     dispatchWorkflow: async (input: { runId: string; claimToken: string }): Promise<DispatchResult> => {
@@ -67,9 +68,11 @@ function harness(options: {
       return { runId: 4242, htmlUrl: 'https://github.com/x/y/actions/runs/4242' };
     },
     findRunSince: async () => {
-      findRunSinceCalls += 1;
       return options.runAppeared ? { id: options.runAppeared.id, headSha: 'x', status: 'queued', createdAtMs: Date.now() } : null;
     },
+    findRunsForRunIds: async (runIds: string[]) => options.runAppeared
+      ? new Map([[runIds[0]!, { id: options.runAppeared.id, headSha: 'x', status: 'queued', createdAtMs: Date.now(), displayTitle: `gateway-run:${runIds[0]}` }]])
+      : new Map(),
     cancelWorkflowRun: async (runId: number) => {
       cancelled.push(runId);
       return { cancelled: true, reason: 'cancelled' as const };
@@ -91,6 +94,7 @@ function harness(options: {
       counter += 1;
       return `token-${counter}`;
     },
+    now: options.clock,
     // Callback в наш API перехватываем: тест не должен стучаться в интернет.
     fetchImpl: (async (url: string | URL, init?: RequestInit) => {
       delivered.push({
@@ -102,7 +106,7 @@ function harness(options: {
     }) as unknown as typeof fetch,
   });
 
-  return { fetch: app.fetch, store, dispatched, cancelled, workflowStatusLookups, delivered };
+  return { fetch: app.fetch, reconcileActive: app.reconcileActive, store, dispatched, cancelled, workflowStatusLookups, delivered };
 }
 
 const spec = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -369,14 +373,15 @@ test('неоднозначный отказ + прогон появился: р�
   assert.equal(stored?.githubRunId, 9090, 'усыновлён именно появившийся прогон');
 });
 
-test('неоднозначный отказ + прогона нет: запись снята, повтор безопасен', async () => {
+test('неоднозначный отказ + прогон пока не виден: запись сохраняется и retry не создаёт дубль', async () => {
   const h = harness({ dispatchFails: 'ambiguous', runAppeared: null });
   const response = await h.fetch(launch(spec()));
   assert.equal(response.status, 502);
-  assert.equal(await h.store.get(RUN_ID), null);
+  assert.equal((await h.store.get(RUN_ID))?.phase, 'queued');
 
-  const retry = harness();
-  assert.equal((await retry.fetch(launch(spec()))).status, 202);
+  const retry = await h.fetch(launch(spec()));
+  assert.equal(retry.status, 202);
+  assert.equal(h.dispatched.length, 0, 'the retry is deduplicated instead of dispatching another workflow');
 });
 
 // ── status ─────────────────────────────────────────────────────────────────────
@@ -400,6 +405,16 @@ test('status: accepted сразу после запуска, running после 
   assert.equal(running['status'], 'running');
 });
 
+test('a stale queued run is reported unknown without mutating its stored state', async () => {
+  let now = Date.now();
+  const h = harness({ dispatchFails: 'ambiguous', runAppeared: null, clock: () => now });
+  await h.fetch(launch(spec()));
+  now += 3 * 60 * 1000;
+  const response = await h.fetch(get(`/v1/runs/${RUN_ID}/status`));
+  assert.equal(((await response.json()) as { status: string }).status, 'unknown');
+  assert.equal((await h.store.get(RUN_ID))?.phase, 'queued');
+});
+
 test('status завершённого рана — succeeded', async () => {
   const h = harness();
   await h.fetch(launch(spec()));
@@ -408,12 +423,17 @@ test('status завершённого рана — succeeded', async () => {
   assert.equal(body['status'], 'succeeded');
 });
 
-test('status closes a failed GitHub workflow that never claimed the run', async () => {
+test('scheduled reconciliation closes a failed workflow; status reads stay pure', async () => {
   const h = harness({ workflowState: { status: 'completed', conclusion: 'failure' } });
   await h.fetch(launch(spec()));
 
   const status = (await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as Record<string, unknown>;
-  assert.equal(status['status'], 'failed');
+  assert.equal(status['status'], 'accepted');
+  assert.deepEqual(h.workflowStatusLookups, []);
+
+  await h.reconcileActive();
+  const reconciled = (await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as Record<string, unknown>;
+  assert.equal(reconciled['status'], 'failed');
   assert.deepEqual(h.workflowStatusLookups, [4242]);
 
   const result = (await (await h.fetch(get(`/v1/runs/${RUN_ID}/result`))).json()) as Record<string, unknown>;
@@ -422,6 +442,20 @@ test('status closes a failed GitHub workflow that never claimed the run', async 
   assert.equal(h.delivered.length, 1);
   assert.equal((h.delivered[0]!.body as { status: string }).status, 'failed');
   assert.equal((await h.store.get(RUN_ID))?.phase, 'done');
+});
+
+test('scheduled reconciliation recovers a queued dispatch by its exact runId title', async () => {
+  const options: { dispatchFails: 'ambiguous'; runAppeared: { id: number } | null } = {
+    dispatchFails: 'ambiguous', runAppeared: null,
+  };
+  const h = harness(options);
+  assert.equal((await h.fetch(launch(spec()))).status, 502);
+  assert.equal((await h.store.get(RUN_ID))?.phase, 'queued');
+  options.runAppeared = { id: 123456 };
+  await h.reconcileActive();
+  const recovered = await h.store.get(RUN_ID);
+  assert.equal(recovered?.phase, 'dispatched');
+  assert.equal(recovered?.githubRunId, 123456);
 });
 
 test('a completed GHA failure does not replace the result after the runner claimed', async () => {
@@ -492,6 +526,20 @@ test('результат пересылается нашему API на resultUr
   assert.equal(h.delivered[0]!.url, API_RESULT_URL);
   assert.equal(h.delivered[0]!.auth, `Bearer ${WORKER_TOKEN}`, 'тот же секрет, которым аутентифицировали launch');
   assert.equal((h.delivered[0]!.body as { exitReason: string }).exitReason, 'completed');
+});
+
+test('duplicate report forwards the first persisted result, not a conflicting retry body', async () => {
+  const h = harness();
+  await h.fetch(launch(spec()));
+  const claim = (await (await h.fetch(post('/v1/claim', { runId: RUN_ID }, h.dispatched[0]!.claimToken))).json()) as { reportToken: string };
+  const first = { exitReason: 'completed', answerSource: 'engine_stdout', stdout: 'first result' };
+  const second = { exitReason: 'startup_failure', answerSource: null, stdout: 'conflicting retry' };
+  await h.fetch(post(`/v1/runs/${RUN_ID}/report`, first, claim.reportToken));
+  const retry = await h.fetch(post(`/v1/runs/${RUN_ID}/report`, second, claim.reportToken));
+  assert.equal(retry.status, 200);
+  assert.equal(h.delivered.length, 2);
+  assert.equal((h.delivered[1]!.body as { stdout: string }).stdout, 'first result');
+  assert.equal((h.delivered[1]!.body as { exitReason: string }).exitReason, 'completed');
 });
 
 test('неудачная пересылка не роняет приём: результат остаётся в воркере', async () => {

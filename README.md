@@ -66,6 +66,27 @@ Run `npm run smoke:sandbox-status -- <completed-github-actions-run-id>` to verif
 that a completed pre-claim workflow failure is surfaced as a failed run. This is a
 gateway component probe, not full Agent API/profile end-to-end acceptance.
 
+### Gateway run state
+
+The sandbox gateway uses the dedicated Cloudflare D1 database
+`opencode-gha-runner-gateway-sandbox-state` through the `RUN_DB` binding. Apply its
+versioned schema from `migrations/` before deploying. `gateway_runs` is the current
+projection keyed by `run_id`; it also indexes `user_task_id`, unique `operation_id`,
+`job_id`, `profile_id`, `conversation_id`, `owner_generation`, and `github_run_id`.
+`gateway_run_events` is an append-only, secret-free lifecycle journal with the same
+identity fields, event type, phase, and timestamp.
+
+New sandbox runs use D1's transactional conditional updates and unique operation ID.
+Pre-existing KV runs remain readable and reconcilable during their existing TTL; they
+are not bulk migrated or deleted. `GET /status` only reads state. A five-minute scheduled
+reconciliation checks up to 100 queued and 100 dispatched runs per invocation and records a terminal
+result only if the runner has not claimed that run. Queued runs are recovered only from
+the exact `gateway-run:<runId>` workflow display title; GitHub's time-window guesses are
+not used. Terminal projections expire after six
+hours, matching the previous KV retention; their sanitized identity events remain, and
+ambiguous active runs are never expired by age. Production still uses its existing KV
+binding; enabling D1 there is a separate reviewed migration.
+
 Внешний воркер Serverless Agent API: принимает `POST /v1/launch`, поднимает одноразовую
 джобу в GitHub Actions, запускает в ней агента opencode и возвращает результат в формате
 `LaunchResult`.

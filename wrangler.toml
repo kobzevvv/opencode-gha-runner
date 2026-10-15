@@ -36,6 +36,12 @@ workers_dev = true
 binding = "RUNS"
 id = "136ea015f1384cd0a84e021dd1dc4902"
 
+[[env.sandbox.d1_databases]]
+binding = "RUN_DB"
+database_name = "opencode-gha-runner-gateway-sandbox-state"
+database_id = "a9689eee-3757-46a7-a341-246e38c679b5"
+migrations_dir = "migrations"
+
 [env.sandbox.vars]
 GITHUB_REPO = "vovalikessmoothy-png/opencode-gha-runner"
 GITHUB_WORKFLOW = "run-agent-sandbox.yml"
@@ -45,3 +51,6 @@ AGENT_BINARY = "opencode"
 
 [observability]
 enabled = true
+
+[env.sandbox.triggers]
+crons = ["*/5 * * * *"]

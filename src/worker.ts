@@ -9,8 +9,10 @@ import { KvRunStore, type KvLike } from './gateway/store.js';
 
 export interface Env {
   RUNS: KvLike;
+  BUILD_SHA?: string;
   WORKER_TOKEN: string;
   WORKER_TOKEN_TELEGRAM_UX?: string;
+  [binding: string]: unknown;
   GITHUB_TOKEN: string;
   GITHUB_REPO: string;
   GITHUB_WORKFLOW?: string;
@@ -25,14 +27,28 @@ export interface Env {
   RING_TARGETS?: string;
 }
 
+export function clientTokensFromEnv(env: Env): Record<string, string> {
+  return Object.fromEntries(Object.entries(env)
+    .filter(([name, value]) => name.startsWith('WORKER_CLIENT_TOKEN_') && typeof value === 'string')
+    .map(([name, value]) => [name.slice('WORKER_CLIENT_TOKEN_'.length).toLowerCase(), value as string]));
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === 'GET' && url.pathname === '/version') {
+      return new Response(JSON.stringify({ service: 'opencode-gha-runner-gateway', buildSha: env.BUILD_SHA ?? null }), {
+        status: 200,
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+      });
+    }
     // Store зависит от binding, а binding приходит только в запросе — поэтому gateway
     // собирается на каждый вызов, а не один раз на уровне модуля.
     const app = createGateway({
       config: {
         workerToken: env.WORKER_TOKEN,
         telegramUxWorkerToken: env.WORKER_TOKEN_TELEGRAM_UX,
+        workerClientTokens: clientTokensFromEnv(env),
         repo: env.GITHUB_REPO,
         workflow: env.GITHUB_WORKFLOW ?? 'run-agent.yml',
         ref: env.GITHUB_REF || undefined,

@@ -621,6 +621,14 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
         return !!line && /\bconnected\b/i.test(line);
       });
       logLine(`mcp preflight exitReason=${checked.exitReason} listed=${listed} connected=${connected} authError=${/\b(?:401|403|unauthorized|forbidden)\b/i.test(output)} notFound=${/\b(?:404|not found)\b/i.test(output)}`);
+      if (!connected) {
+        // runAgent has already redacted the known secrets; also strip URLs and
+        // long opaque values before putting the connection error in Actions logs.
+        const diagnostic = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 8)
+          .join(' | ').replace(/https?:\/\/\S+/g, '[url]').replace(/\b[A-Za-z0-9_-]{40,}\b/g, '[redacted]')
+          .slice(0, 500);
+        logLine(`mcp preflight diagnostic=${diagnostic}`);
+      }
     }
     const extraArgs = (env.AGENT_ARGS ?? '').split(' ').filter(Boolean);
     const agentArgs = [...extraArgs, 'run', spec.input.inlinePrompt];

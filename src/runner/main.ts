@@ -61,6 +61,8 @@ export interface RunnerEnv {
   WORKSPACE_ROOT?: string;
   /** Дополнительные флаги агенту (модель и т.п.), через пробел. */
   AGENT_ARGS?: string;
+  /** Sandbox-only connection probe before running a model with MCP tools. */
+  MCP_PREFLIGHT?: string;
   /** `false` — запретить sudo, чтобы прогнать приёмку без создания пользователей. */
   ALLOW_SUDO?: string;
   /** `skip` — не ставить конфиг провайдера (агент уже сконфигурирован в репозитории). */
@@ -601,6 +603,25 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       isolationEnforced: identity.enforced,
       injectedSecrets: mcpSecrets,
     });
+    if (env.MCP_PREFLIGHT === 'true' && Object.keys(spec.mcp?.servers ?? {}).length > 0) {
+      const checked = await runAgent({
+        identity: identityOfRun,
+        binary: claim.agentBinary,
+        argv: ['--pure', 'mcp', 'list'],
+        env: processEnv,
+        timeoutMs: 30_000,
+        maxOutputBytes: 20_000,
+        secrets,
+      });
+      const output = `${checked.stdout}\n${checked.stderr}`;
+      const serverNames = Object.keys(spec.mcp!.servers);
+      const listed = serverNames.every((name) => output.includes(name));
+      const connected = serverNames.every((name) => {
+        const line = output.split(/\r?\n/).find((item) => item.includes(name));
+        return !!line && /\bconnected\b/i.test(line);
+      });
+      logLine(`mcp preflight exitReason=${checked.exitReason} listed=${listed} connected=${connected} authError=${/\b(?:401|403|unauthorized|forbidden)\b/i.test(output)} notFound=${/\b(?:404|not found)\b/i.test(output)}`);
+    }
     const extraArgs = (env.AGENT_ARGS ?? '').split(' ').filter(Boolean);
     const agentArgs = [...extraArgs, 'run', spec.input.inlinePrompt];
     // Промпт в лог не пишем: он может содержать секреты, а лог уезжает в GCS.

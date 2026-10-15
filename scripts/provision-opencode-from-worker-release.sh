@@ -2,7 +2,13 @@
 set -euo pipefail
 
 repo='trained-assist/ai-agent-runner'
-release_tag="${WORKER_RELEASE_TAG:-vm-worker-v0.3.16}"
+release_tag="${WORKER_RELEASE_TAG:-}"
+if [[ -z "$release_tag" ]]; then
+  release_tag="$(gh release list --repo "$repo" --limit 100 \
+    --json tagName,isLatest,isDraft,isPrerelease \
+    --jq '[.[] | select(.isLatest == true and .isDraft == false and .isPrerelease == false) | select(.tagName | test("^vm-worker-v[0-9]+\\.[0-9]+\\.[0-9]+$"))] | if length == 1 then .[0].tagName else error("expected exactly one latest stable vm-worker release") end')"
+fi
+echo "Resolved OpenCode worker release: $release_tag"
 archive_name='ai-agent-vm-worker-linux-x64.tar.gz'
 signer_workflow="$repo/.github/workflows/vm-worker-release.yml"
 tmp_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"

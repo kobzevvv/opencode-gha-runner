@@ -28,5 +28,4 @@ jobs:
       - name: Verify OpenCode provisioning from the attested VM release
         env:
           GH_TOKEN: ${{ github.token }}
-          WORKER_RELEASE_TAG: vm-worker-v0.3.16
         run: bash scripts/provision-opencode-from-worker-release.sh

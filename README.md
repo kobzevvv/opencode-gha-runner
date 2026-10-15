@@ -19,6 +19,22 @@ gateway component probe, not full Agent API/profile end-to-end acceptance.
 Контракт — issue #73 в [`trained-assist/ai-agent-runner`](https://github.com/trained-assist/ai-agent-runner/issues/73).
 Движок в нашем API: `engine.name = "dynamic-ip-azure-agent-run"`, адаптер `DynamicIpAzureAdapter`.
 
+## OpenCode release used for runs
+
+GHA jobs resolve the current non-draft, non-prerelease `vm-worker-vX.Y.Z` GitHub Release
+marked latest in `trained-assist/ai-agent-runner` when provisioning starts. The release is
+not trusted by the latest marker alone: provisioning verifies the checksum and GitHub
+build-provenance attestation, then checks the bundled worker version, OpenCode version,
+and binary SHA-256 before installing it. The exact release tag, OpenCode version, and
+binary SHA are written to the Actions log for every job. Invalid or unverifiable latest
+releases fail the job closed; the workflow does not silently fall back to an older build.
+
+Publishing/promoting a worker release changes the version used by subsequently started
+GHA runs; already running jobs keep their installed binary. To roll back, set the intended
+known-good worker release as the GitHub latest release before new jobs start. This is the
+GHA rollout path; France VM, Azure, and desktop promotion are tracked separately in
+[architecture issue #271](https://github.com/trained-assist/trained-agent-architecture/issues/271).
+
 ## Схема
 
 ```

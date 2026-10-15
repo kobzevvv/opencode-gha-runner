@@ -67,10 +67,9 @@ jobs:
           version: '>= 363.0.0'
 
       # GHA и VM используют один подписанный worker-релиз и один provisioning-скрипт.
-      - name: Install pinned OpenCode fork
+      - name: Install latest promoted verified OpenCode fork
         env:
           GH_TOKEN: ${{ github.token }}
-          WORKER_RELEASE_TAG: vm-worker-v0.3.16
         run: bash scripts/provision-opencode-from-worker-release.sh
 
       - name: Run agent

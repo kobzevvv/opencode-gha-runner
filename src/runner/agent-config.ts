@@ -45,6 +45,7 @@ export function renderAgentConfig(template: string, options: RenderedConfigOptio
   const config = JSON.parse(template) as {
     provider?: Record<string, { options?: { apiKey?: string } }>;
     mcp?: Record<string, unknown>;
+    permission?: Record<string, string | Record<string, string>>;
   };
 
   for (const provider of Object.values(config.provider ?? {})) {
@@ -61,10 +62,16 @@ export function renderAgentConfig(template: string, options: RenderedConfigOptio
       config.mcp[name] = {
         type: 'remote',
         url: server.url,
+        // The host uses run-bound bearer/proof headers, not OpenCode's interactive OAuth flow.
+        oauth: false,
         // Заголовки с секретами приходят как `{env:ИМЯ}` и остаются ссылками.
         ...(server.headers ? { headers: server.headers } : {}),
         enabled: server.enabled !== false,
       };
+      for (const tool of server.allowedTools ?? []) {
+        const toolId = `${name.replace(/[^a-zA-Z0-9_-]/g, '_')}_${tool.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+        config.permission = { ...(config.permission ?? {}), [toolId]: 'allow' };
+      }
     }
   }
 

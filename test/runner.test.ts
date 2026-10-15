@@ -448,31 +448,62 @@ test('remote MCP попадает в конфиг, а токен остаётс�
         type: 'remote',
         url: 'https://recruiter-assistant.ru/mcp',
         headers: { Authorization: 'Bearer {env:AGENT_MCP_TOKEN}' },
+        allowedTools: ['identity.whoami', 'google_docs.get_document'],
       },
     },
   });
   const config = JSON.parse(rendered) as {
-    mcp: Record<string, { type: string; url: string; headers: Record<string, string>; enabled: boolean }>;
+    mcp: Record<string, { type: string; url: string; headers: Record<string, string>; enabled: boolean; oauth: boolean }>;
+    permission: Record<string, string>;
   };
   assert.equal(config.mcp['trained-skills']!.type, 'remote');
   assert.equal(config.mcp['trained-skills']!.url, 'https://recruiter-assistant.ru/mcp');
   assert.equal(config.mcp['trained-skills']!.headers['Authorization'], 'Bearer {env:AGENT_MCP_TOKEN}');
   assert.equal(config.mcp['trained-skills']!.enabled, true);
+  assert.equal(config.mcp['trained-skills']!.oauth, false);
+  assert.equal(config.permission['trained-skills_identity_whoami'], 'allow');
+  assert.equal(config.permission['trained-skills_google_docs_get_document'], 'allow');
   assert.ok(!rendered.includes('rt_'), 'самого токена в конфиге быть не должно — только ссылка на env');
+});
+
+test('user MCP catalog uses canonical mem-gpt OpenCode tool IDs', () => {
+  const rendered = renderAgentConfig(readFileSync(AGENT_CONFIG_TEMPLATE, 'utf8'), {
+    llmKeyEnvName: 'K',
+    mcpServers: {
+      'mem-gpt': {
+        type: 'remote',
+        url: 'https://trained-assist-mcp-user-sandbox.skillset-apply.workers.dev/mcp',
+        allowedTools: ['identity.whoami', 'google_docs.connect', 'google_docs.get_document'],
+      },
+    },
+  });
+  const config = JSON.parse(rendered) as {
+    mcp: Record<string, { oauth: boolean; enabled: boolean }>;
+    permission: Record<string, string>;
+  };
+  assert.equal(config.mcp['mem-gpt']!.oauth, false);
+  assert.equal(config.mcp['mem-gpt']!.enabled, true);
+  assert.deepEqual(Object.fromEntries(Object.entries(config.permission).filter(([tool]) => tool.startsWith('mem-gpt_'))), {
+    'mem-gpt_identity_whoami': 'allow',
+    'mem-gpt_google_docs_connect': 'allow',
+    'mem-gpt_google_docs_get_document': 'allow',
+  });
 });
 
 test('несколько MCP-серверов и выключенный сервер', () => {
   const rendered = renderAgentConfig(readFileSync(AGENT_CONFIG_TEMPLATE, 'utf8'), {
     llmKeyEnvName: 'K',
     mcpServers: {
-      'trained-skills': { type: 'remote', url: 'https://a.example/mcp' },
+      'trained-skills': { type: 'remote', url: 'https://a.example/mcp', allowedTools: ['read_only'] },
       hh: { type: 'remote', url: 'https://b.example/mcp', enabled: false },
     },
   });
-  const config = JSON.parse(rendered) as { mcp: Record<string, { enabled: boolean; headers?: unknown }> };
+  const config = JSON.parse(rendered) as { mcp: Record<string, { enabled: boolean; oauth: boolean; headers?: unknown }>; permission: Record<string, string> };
   assert.deepEqual(Object.keys(config.mcp).sort(), ['hh', 'trained-skills']);
   assert.equal(config.mcp['hh']!.enabled, false);
   assert.equal(config.mcp['trained-skills']!.enabled, true);
+  assert.equal(config.mcp['trained-skills']!.oauth, false);
+  assert.equal(config.permission['trained-skills_read_only'], 'allow');
   assert.equal(config.mcp['trained-skills']!.headers, undefined, 'без заголовков ключа быть не должно');
 });
 

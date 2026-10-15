@@ -77,6 +77,8 @@ export interface McpRemoteServerSpec {
   url: string;
   headers?: Record<string, string>;
   enabled?: boolean;
+  /** Exact tool subset already authorized by the trusted Agent API host policy. */
+  allowedTools?: string[];
 }
 
 export interface McpSpec {
@@ -611,6 +613,13 @@ export function validateLaunchRequest(input: unknown): LaunchRequest {
         }
         if (typeof server['url'] !== 'string' || !/^https?:\/\//.test(server['url'])) {
           issues.push(`mcp.servers.${name}.url: expected an http(s) URL`);
+        }
+        if (server['allowedTools'] !== undefined) {
+          if (!Array.isArray(server['allowedTools']) || server['allowedTools'].length > 50 ||
+              server['allowedTools'].some(tool => typeof tool !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(tool)) ||
+              new Set(server['allowedTools']).size !== server['allowedTools'].length) {
+            issues.push(`mcp.servers.${name}.allowedTools: expected unique safe MCP tool names`);
+          }
         }
         if (server['headers'] !== undefined) {
           if (!isPlainObject(server['headers'])) {

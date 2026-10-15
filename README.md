@@ -37,7 +37,9 @@ credential через `GH_TOKEN`, не подставляй токен в арг
   его вручную на отдельном runner.
 - Адреса Workers, execution-repository allowlist, gateway credentials и bindings
   принадлежат sandbox/provisioning-конфигурации в `ai-agent-runner` и Cloudflare. Меняй
-  их через проверенный provisioning/deploy workflow из исходного репозитория. Не правь
+  их через проверенный provisioning/deploy workflow из исходного репозитория. GHA gateway
+  sandbox разворачивается workflow `Deploy GHA gateway sandbox` в `ai-agent-runner`; он
+  проверяет gateway source SHA через `/version`. Не правь
   live vars/secrets через Wrangler или dashboard как постоянное исправление: такая
   правка расходится с источником истины и будет потеряна при следующем deploy.
 

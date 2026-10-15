@@ -28,6 +28,7 @@ concurrency:
 permissions:
   contents: read
   id-token: write
+  attestations: read
 
 jobs:
   run:
@@ -65,14 +66,12 @@ jobs:
         with:
           version: '>= 363.0.0'
 
-      # Бинарь ставится до создания идентичности и делается world-readable, чтобы
-      # агент мог его исполнить под своим UID, но не мог переписать.
-      - name: Install opencode
-        run: |
-          set -euo pipefail
-          npm install -g opencode-ai --no-audit --no-fund
-          sudo chmod -R a+rX "$(npm root -g)"
-          opencode --version
+      # GHA и VM используют один подписанный worker-релиз и один provisioning-скрипт.
+      - name: Install pinned OpenCode fork
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKER_RELEASE_TAG: vm-worker-v0.3.16
+        run: bash scripts/provision-opencode-from-worker-release.sh
 
       - name: Run agent
         env:

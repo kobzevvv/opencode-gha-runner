@@ -38,7 +38,7 @@ id = "136ea015f1384cd0a84e021dd1dc4902"
 
 [env.sandbox.vars]
 GITHUB_REPO = "vovalikessmoothy-png/opencode-gha-runner"
-GITHUB_WORKFLOW = "run-agent.yml"
+GITHUB_WORKFLOW = "run-agent-sandbox.yml"
 GITHUB_REF = "main"
 PUBLIC_BASE_URL = "https://opencode-gha-runner-gateway-sandbox.skillset-apply.workers.dev"
 AGENT_BINARY = "opencode"

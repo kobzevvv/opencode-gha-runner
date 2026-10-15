@@ -52,6 +52,10 @@ production credentials, Workers и ботов в sandbox-проверки не �
 
 ## Isolated gateway component sandbox
 
+The sandbox gateway dispatches `run-agent-sandbox.yml`, which claims only from the
+sandbox gateway URL and keeps session logs local to the job. It does not use the
+repository's production gateway URL, GCS bindings, or artifact credential.
+
 `npm run deploy:sandbox` deploys `opencode-gha-runner-gateway-sandbox` with a
 dedicated KV namespace. It targets the public test workflow repository and is not
 connected to Telegram or the Agent API. Set a sandbox-only `WORKER_TOKEN` using

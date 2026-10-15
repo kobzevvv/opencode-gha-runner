@@ -17,6 +17,36 @@ credential через `GH_TOKEN`, не подставляй токен в арг
 Если credential отсутствует или не имеет доступа, остановись и сообщи точную ошибку;
 не создавай fork как обходной путь.
 
+## Provisioning и конфигурация запуска
+
+Этот репозиторий содержит GHA gateway и executor. Он не является хранилищем
+пользовательских MCP-ключей и не должен самовольно настраивать live Cloudflare Workers.
+Не проси пользователя передавать PAT для запуска агента и не копируй credentials из
+других Workers или репозиториев.
+
+Источники конфигурации разделены по ответственности:
+
+- Состав MCP-серверов, разрешённые инструменты и привязанные к ним credentials задаёт
+  Control Plane из конфигурации и credentials в управляемой Cloudflare-таблице. Он
+  передаёт настройки конкретного запуска
+  в `LaunchRequest`; gateway хранит их до одноразового `/v1/claim`, а executor применяет
+  их только к этому запуску. Не добавляй MCP-ключи в GHA secrets, workflow inputs,
+  исходники или постоянный конфиг агента.
+- Версия OpenCode/worker выбирается и проверяется при provisioning по опубликованному
+  release и передаётся запуску через claim. Не закрепляй локальный бинарь и не обновляй
+  его вручную на отдельном runner.
+- Адреса Workers, execution-repository allowlist, gateway credentials и bindings
+  принадлежат sandbox/provisioning-конфигурации в `ai-agent-runner` и Cloudflare. Меняй
+  их через проверенный provisioning/deploy workflow из исходного репозитория. Не правь
+  live vars/secrets через Wrangler или dashboard как постоянное исправление: такая
+  правка расходится с источником истины и будет потеряна при следующем deploy.
+
+Перед live-проверкой проследи цепочку `Control Plane → Serverless Agent API → gateway
+Worker → private Actions repository → claim → OpenCode`. Для sandbox используй только
+изолированные ресурсы и execution repository, перечисленные в sandbox-конфигурации;
+production credentials, Workers и ботов в sandbox-проверки не подключай. `/healthz`
+подтверждает только доступность gateway, а не успешный запуск или подключение MCP.
+
 
 ## Isolated gateway component sandbox
 
@@ -440,6 +470,14 @@ keychain под `WORKER_TOKEN` / `opencode-gha-runner-gateway`. В репози�
   Теперь `fetch.bind(globalThis)`.
 
 ## Деплой шлюза
+
+Команды ниже предназначены только для изолированного локального/одноразового стенда.
+Не используй их для общего sandbox или production и не считай ручной Wrangler deploy
+источником конфигурации. Общие sandbox Workers, их секреты/bindings и список разрешённых
+execution-репозиториев доставляются provisioning/deploy workflow в `ai-agent-runner`;
+изменяй исходную конфигурацию там и проверяй результат по SHA/version endpoint. Если
+workflow отсутствует или не умеет доставить нужную настройку, сначала исправь сам путь
+доставки и его проверку, а не подменяй его ручной правкой live Worker.
 
 ```bash
 npx wrangler kv namespace create RUNS     # вписать id в wrangler.toml

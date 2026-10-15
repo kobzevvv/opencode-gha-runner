@@ -389,6 +389,11 @@ test('status: accepted сразу после запуска, running после 
   assert.equal(accepted['status'], 'accepted');
   assert.equal(accepted['runId'], RUN_ID);
   assert.ok(typeof accepted['updatedAt'] === 'string');
+  assert.equal(accepted['updatedAt'], new Date((await h.store.get(RUN_ID))!.updatedAt).toISOString());
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const polled = (await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as Record<string, unknown>;
+  assert.equal(polled['updatedAt'], accepted['updatedAt'], 'status polling must not rewrite the run record');
 
   await h.fetch(post('/v1/claim', { runId: RUN_ID }, h.dispatched[0]!.claimToken));
   const running = (await (await h.fetch(get(`/v1/runs/${RUN_ID}/status`))).json()) as Record<string, unknown>;

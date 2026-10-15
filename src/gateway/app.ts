@@ -130,6 +130,9 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
   const randomToken = deps.randomToken ?? defaultRandomToken;
   const now = deps.now ?? (() => Date.now());
   const workflowStatusRefreshMs = deps.workflowStatusRefreshMs ?? 30_000;
+  // Status polling must never write the run record: a stale KV read followed by
+  // a write can undo a concurrent claim or final report.
+  const workflowStatusCheckedAt = new Map<string, number>();
   const log = deps.log ?? ((): void => {});
   // Клиент строится под цель: у каждого репозитория кольца свой токен и своя история
   // прогонов. Кэш по ключу «репозиторий+токен» — чтобы не пересобирать на каждый запрос.
@@ -433,7 +436,10 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
    */
   async function reconcileUnclaimedWorkflow(run: StoredRun): Promise<void> {
     if (run.phase !== 'dispatched' || run.githubRunId === null) return;
-    if (now() - run.updatedAt < workflowStatusRefreshMs) return;
+    const checkedAt = workflowStatusCheckedAt.get(run.runId) ?? run.updatedAt;
+    if (now() - checkedAt < workflowStatusRefreshMs) return;
+    if (workflowStatusCheckedAt.size >= 1024) workflowStatusCheckedAt.clear();
+    workflowStatusCheckedAt.set(run.runId, now());
 
     let workflow: { status: string; conclusion: string | null } | null;
     try {
@@ -443,11 +449,8 @@ export function createGateway(deps: GatewayDeps): { fetch: (request: Request) =>
         runId: run.runId,
         error: redact(cause instanceof Error ? cause.message : String(cause)),
       });
-      await store.patch(run.runId, {});
       return;
     }
-    // Throttle checks even if GitHub has not indexed the run or reports it missing.
-    await store.patch(run.runId, {});
     if (!workflow || workflow.status !== 'completed' || !workflow.conclusion || workflow.conclusion === 'success') return;
 
     // Do not overwrite a claim/result that arrived while GitHub was being queried.

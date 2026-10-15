@@ -52,8 +52,5 @@ AGENT_BINARY = "opencode"
 [observability]
 enabled = true
 
-[triggers]
-crons = ["*/5 * * * *"]
-
 [env.sandbox.triggers]
 crons = ["*/5 * * * *"]

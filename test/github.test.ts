@@ -22,7 +22,7 @@ test('public workflow status lookup omits Authorization when no token is configu
   let authorization: string | null = 'not-called';
   const client = new GitHubClient({
     token: '',
-    repo: 'kobzevvv/opencode-gha-runner',
+    repo: 'vovalikessmoothy-png/opencode-gha-runner',
     workflow: 'run-agent.yml',
     fetchImpl: (async (_input: string | URL, init?: RequestInit) => {
       authorization = new Headers(init?.headers).get('authorization');

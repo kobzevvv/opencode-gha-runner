@@ -8,7 +8,7 @@ if (!Number.isSafeInteger(githubRunId) || githubRunId <= 0) {
   throw new Error('Usage: npm run smoke:sandbox-status -- <completed-public-github-actions-run-id>');
 }
 
-const apiBase = 'https://api.github.com/repos/kobzevvv/opencode-gha-runner/actions/runs';
+const apiBase = 'https://api.github.com/repos/vovalikessmoothy-png/opencode-gha-runner/actions/runs';
 const headers = { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' };
 const githubResponse = await fetch(`${apiBase}/${githubRunId}`, { headers });
 if (!githubResponse.ok) throw new Error(`GitHub Actions run lookup failed: HTTP ${githubResponse.status}`);
@@ -86,7 +86,7 @@ try {
       envAllowlist: [],
       env: {},
       limits: { timeoutMs: 1000, maxOutputBytes: 1024, maxLogBytes: 1024 },
-      repository: { fullName: 'kobzevvv/opencode-gha-runner', branch: 'sandbox-probe' },
+      repository: { fullName: 'vovalikessmoothy-png/opencode-gha-runner', branch: 'sandbox-probe' },
       resultUrl: 'https://callback.example.invalid/sandbox-probe',
       isolation: { mode: 'none' },
     },
@@ -94,7 +94,7 @@ try {
     createdAt: oldEnough,
     updatedAt: oldEnough,
     githubRunId,
-    target: { repo: 'kobzevvv/opencode-gha-runner', workflow: 'run-agent.yml', ref: 'fix/profile-snapshot-write-permissions-20261008', token: '' },
+    target: { repo: 'vovalikessmoothy-png/opencode-gha-runner', workflow: 'run-agent.yml', ref: 'main', token: '' },
     claimToken: 'synthetic-claim-token',
     reportToken: 'synthetic-report-token',
     result: null,

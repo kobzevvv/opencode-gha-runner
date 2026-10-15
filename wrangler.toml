@@ -34,9 +34,9 @@ binding = "RUNS"
 id = "136ea015f1384cd0a84e021dd1dc4902"
 
 [env.sandbox.vars]
-GITHUB_REPO = "kobzevvv/opencode-gha-runner"
+GITHUB_REPO = "vovalikessmoothy-png/opencode-gha-runner"
 GITHUB_WORKFLOW = "run-agent.yml"
-GITHUB_REF = "fix/profile-snapshot-write-permissions-20261008"
+GITHUB_REF = "main"
 PUBLIC_BASE_URL = "https://opencode-gha-runner-gateway-sandbox.skillset-apply.workers.dev"
 AGENT_BINARY = "opencode"
 

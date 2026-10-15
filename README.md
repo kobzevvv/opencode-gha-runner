@@ -9,7 +9,7 @@ credential в macOS Keychain — не проси пользователя пов
 значение:
 
 ```bash
-security find-generic-password -s github.com -a gha-compute-cluster -w | gh api user --jq .login
+GH_TOKEN="$(security find-generic-password -s github.com -a gha-compute-cluster -w)" gh api user --jq .login
 ```
 
 Команда должна вывести GitHub-логин. Для последующих команд `gh` используй именно этот

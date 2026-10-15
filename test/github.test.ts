@@ -43,3 +43,28 @@ test('a missing workflow run stays unknown to the caller', async () => {
 
   assert.equal(await client.getWorkflowRunState(404), null);
 });
+
+test('restart recovery adopts only an exact runId embedded in the workflow display title', async () => {
+  const client = new GitHubClient({
+    token: 'token-for-test', repo: 'owner/repo', workflow: 'run-agent.yml',
+    fetchImpl: (async () => Response.json({ workflow_runs: [
+      { id: 10, head_sha: 'sha', status: 'queued', created_at: new Date().toISOString(), display_title: 'gateway-run:run_other' },
+      { id: 11, head_sha: 'sha', status: 'in_progress', created_at: new Date().toISOString(), display_title: 'gateway-run:run_target' },
+    ] })) as typeof fetch,
+  });
+  const found = await client.findRunsForRunIds(['run_target']);
+  assert.equal(found.size, 1);
+  assert.equal(found.get('run_target')?.id, 11);
+  assert.equal(found.has('run_other'), false);
+});
+
+test('restart recovery leaves duplicate exact workflow titles ambiguous', async () => {
+  const client = new GitHubClient({
+    token: 'token-for-test', repo: 'owner/repo', workflow: 'run-agent.yml',
+    fetchImpl: (async () => Response.json({ workflow_runs: [
+      { id: 10, head_sha: 'sha', status: 'completed', created_at: new Date().toISOString(), display_title: 'gateway-run:run_target' },
+      { id: 11, head_sha: 'sha', status: 'queued', created_at: new Date().toISOString(), display_title: 'gateway-run:run_target' },
+    ] })) as typeof fetch,
+  });
+  assert.equal((await client.findRunsForRunIds(['run_target'])).has('run_target'), false);
+});

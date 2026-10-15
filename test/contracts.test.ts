@@ -5,6 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import {
   ENGINE_NAME,
   ValidationError,
@@ -225,4 +226,38 @@ test('проверяет mcpSecrets как env-имена', () => {
   assert.throws(() => validateLaunchRequest(validLaunchRequest({ mcpSecrets: { 'BAD NAME': 'v' } } as never)));
   assert.throws(() => validateLaunchRequest(validLaunchRequest({ mcpSecrets: { OK: '' } } as never)));
   assert.throws(() => validateLaunchRequest(validLaunchRequest({ mcpSecrets: { OK: 42 } } as never)));
+});
+
+test('shared MCP proof run IDs and attachment fields pass through the gateway contract', { skip: !process.env['MCP_RUN_PROOF_CONTRACT'] }, () => {
+  const contract = JSON.parse(readFileSync(process.env['MCP_RUN_PROOF_CONTRACT']!, 'utf8')) as {
+    runId: { acceptedExamples: string[]; patterns: string[] };
+    testTool: { tool: string; scope: string };
+    transport: { operationHeader: string; operationValue: string; scopeHeader: string; runIdHeader: string; taskIdHeader: string; proofHeader: string };
+  };
+  for (const runId of contract.runId.acceptedExamples) {
+    assert.equal(contract.runId.patterns.some((pattern) => new RegExp(pattern).test(runId)), true);
+    const proofRef = '{env:RUNNER_MCP_REGISTRY_TEST_PROOF}';
+    const request = validLaunchRequest({
+      runId,
+      repository: { fullName: 'owner/name', branch: `agent-run/${runId}` },
+      resultUrl: `https://api.example/v1/worker/launches/${encodeURIComponent(runId)}/result`,
+      mcp: { servers: { registry: {
+        type: 'remote', url: 'https://mcp.example/mcp', allowedTools: [contract.testTool.tool],
+        headers: {
+          Authorization: 'Bearer {env:RUNNER_MCP_REGISTRY_TEST}',
+          [contract.transport.operationHeader]: contract.transport.operationValue,
+          [contract.transport.scopeHeader]: contract.testTool.scope,
+          [contract.transport.runIdHeader]: runId,
+          [contract.transport.taskIdHeader]: 'task_contract_fixture',
+          [contract.transport.proofHeader]: proofRef,
+        },
+      } } },
+      mcpSecrets: { RUNNER_MCP_REGISTRY_TEST: 'synthetic-test-bearer', RUNNER_MCP_REGISTRY_TEST_PROOF: 'synthetic-test-proof' },
+    });
+    const validated = validateLaunchRequest(request);
+    assert.equal(validated.runId, runId);
+    assert.equal(validated.mcp?.servers['registry']?.headers?.[contract.transport.runIdHeader], runId);
+    assert.equal(validated.mcp?.servers['registry']?.headers?.[contract.transport.proofHeader], proofRef);
+    assert.equal(validated.mcpSecrets?.['RUNNER_MCP_REGISTRY_TEST_PROOF'], 'synthetic-test-proof');
+  }
 });

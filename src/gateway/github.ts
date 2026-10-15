@@ -64,6 +64,7 @@ export interface WorkflowRunSummary {
   headSha: string;
   status: string;
   createdAtMs: number | null;
+  displayTitle?: string;
 }
 
 export interface WorkflowRunState {
@@ -174,14 +175,30 @@ export class GitHubClient {
   private async listWorkflowRuns(perPage = 20): Promise<WorkflowRunSummary[]> {
     const params = new URLSearchParams({ per_page: String(perPage), event: 'workflow_dispatch' });
     const { data } = await this.request<{
-      workflow_runs?: Array<{ id: number; head_sha: string; status: string; created_at?: string }>;
+      workflow_runs?: Array<{ id: number; head_sha: string; status: string; created_at?: string; display_title?: string }>;
     }>('GET', `/repos/${this.repo}/actions/workflows/${this.workflow}/runs?${params}`);
     return (data.workflow_runs ?? []).map((run) => ({
       id: run.id,
       headSha: run.head_sha,
       status: run.status,
       createdAtMs: run.created_at ? Date.parse(run.created_at) : null,
+      ...(typeof run.display_title === 'string' ? { displayTitle: run.display_title } : {}),
     }));
+  }
+
+  /** Exact recovery for a run whose dispatch response or gateway process was lost. */
+  async findRunsForRunIds(runIds: string[]): Promise<Map<string, WorkflowRunSummary>> {
+    const requested = new Set(runIds.map((runId) => `gateway-run:${runId}`));
+    const matches = new Map<string, WorkflowRunSummary | null>();
+    for (const run of await this.listWorkflowRuns(100)) {
+      const title = run.displayTitle;
+      if (!title || !requested.has(title)) continue;
+      const runId = title.slice('gateway-run:'.length);
+      // Multiple exact matches are ambiguous (for example, an operator manually
+      // reran a workflow). Keep them unreconciled rather than guess which one owns it.
+      matches.set(runId, matches.has(runId) ? null : run);
+    }
+    return new Map([...matches].filter((entry): entry is [string, WorkflowRunSummary] => entry[1] !== null));
   }
 
   /**

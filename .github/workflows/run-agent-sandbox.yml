@@ -5,6 +5,7 @@
 # показывает inputs в метаданных прогона, и всё, что туда попало, читает любой.
 # Всё остальное джоба забирает у шлюза одноразовым claim'ом (см. src/claim.ts).
 name: run-agent-sandbox
+run-name: gateway-run:${{ inputs.run_id }}
 
 on:
   workflow_dispatch:

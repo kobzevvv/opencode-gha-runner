@@ -19,12 +19,20 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Check out canonical MCP proof contract
+        uses: actions/checkout@v4
+        with:
+          repository: trained-assist/trained-assist-mcp-host
+          ref: main
+          path: mcp-host-contract
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
       - run: npm ci
       - run: npm run verify
+        env:
+          MCP_RUN_PROOF_CONTRACT: ${{ github.workspace }}/mcp-host-contract/contracts/runner-mcp-proof/v1/contract.json
       - name: Verify OpenCode provisioning from the attested VM release
         env:
           GH_TOKEN: ${{ github.token }}

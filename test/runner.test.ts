@@ -466,6 +466,30 @@ test('remote MCP попадает в конфиг, а токен остаётс�
   assert.ok(!rendered.includes('rt_'), 'самого токена в конфиге быть не должно — только ссылка на env');
 });
 
+test('user MCP catalog uses canonical mem-gpt OpenCode tool IDs', () => {
+  const rendered = renderAgentConfig(readFileSync(AGENT_CONFIG_TEMPLATE, 'utf8'), {
+    llmKeyEnvName: 'K',
+    mcpServers: {
+      'mem-gpt': {
+        type: 'remote',
+        url: 'https://trained-assist-mcp-user-sandbox.skillset-apply.workers.dev/mcp',
+        allowedTools: ['identity.whoami', 'google_docs.connect', 'google_docs.get_document'],
+      },
+    },
+  });
+  const config = JSON.parse(rendered) as {
+    mcp: Record<string, { oauth: boolean; enabled: boolean }>;
+    permission: Record<string, string>;
+  };
+  assert.equal(config.mcp['mem-gpt']!.oauth, false);
+  assert.equal(config.mcp['mem-gpt']!.enabled, true);
+  assert.deepEqual(Object.fromEntries(Object.entries(config.permission).filter(([tool]) => tool.startsWith('mem-gpt_'))), {
+    'mem-gpt_identity_whoami': 'allow',
+    'mem-gpt_google_docs_connect': 'allow',
+    'mem-gpt_google_docs_get_document': 'allow',
+  });
+});
+
 test('несколько MCP-серверов и выключенный сервер', () => {
   const rendered = renderAgentConfig(readFileSync(AGENT_CONFIG_TEMPLATE, 'utf8'), {
     llmKeyEnvName: 'K',

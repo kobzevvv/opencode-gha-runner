@@ -50,9 +50,10 @@ jobs:
         run: npm ci --no-audit --no-fund && npm run build && npm test
 
       # GHA и VM используют один подписанный worker-релиз и один provisioning-скрипт.
-      - name: Install latest promoted verified OpenCode fork
+      - name: Install pinned promoted verified OpenCode fork
         env:
           GH_TOKEN: ${{ github.token }}
+          WORKER_RELEASE_TAG: vm-worker-v0.3.28
         run: bash scripts/provision-opencode-from-worker-release.sh
 
       - name: Run agent

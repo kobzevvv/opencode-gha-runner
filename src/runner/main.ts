@@ -451,6 +451,7 @@ export function buildLaunchResult(input: {
   answer: { text?: string; source: AnswerSource };
   artifacts: ArtifactRef[];
   repo: RepoRef;
+  publicationOutcome?: LaunchResult['publicationOutcome'];
   logUrl: string;
   outputTruncated: boolean;
   profileChanges?: LaunchResult['profileChanges'];
@@ -479,6 +480,7 @@ export function buildLaunchResult(input: {
     artifacts: input.artifacts,
     logUrl: input.logUrl,
     repo: input.repo,
+    ...(input.publicationOutcome ? { publicationOutcome: input.publicationOutcome } : {}),
     ...(input.profileChanges ? { profileChanges: input.profileChanges } : {}),
     ...(input.failure ? { failure: input.failure } : {}),
   };
@@ -676,17 +678,22 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
         profileSavebackNote = `profile saveback failed: ${summary}`;
       }
     }
-    const published: { artifactRefs: ArtifactRef[]; repo: RepoRef; note: string | null; profileChanges?: LaunchResult['profileChanges'] } = spec.profileWorkspace
+    const publicationMode = spec.publicationMode ?? 'git';
+    const published: { artifactRefs: ArtifactRef[]; repo: RepoRef; note: string | null; publicationOutcome: NonNullable<LaunchResult['publicationOutcome']>; profileChanges?: LaunchResult['profileChanges'] } = publicationMode === 'none'
+      ? { artifactRefs: [], repo: { fullName: spec.repository.fullName, branch: spec.repository.branch, commit: NULL_SHA }, note: null, publicationOutcome: 'not_requested' }
+      : spec.profileWorkspace
       ? {
           artifactRefs: collected.artifacts.map((entry) => ({ ...entry, path: entry.path.replace(/^artifacts\//, '') })),
           repo: { fullName: spec.repository.fullName, branch: spec.repository.branch, commit: NULL_SHA },
           note: profileSavebackNote,
+          publicationOutcome: profileSavebackNote ? 'failed' : 'published',
           ...(profileChanges ? { profileChanges } : {}),
         }
-      : await publishArtifacts({
+      : { ...await publishArtifacts({
           spec, runId, workspace, token: artifactsToken, collected, outcome, startedAt, sessionLog,
           profileBucket: env.GCS_PROFILE_BUCKET, profileDeletes,
-        });
+        }), publicationOutcome: 'published' as const };
+    if (published.note && !spec.profileWorkspace) published.publicationOutcome = 'failed';
     if (published.note) outcome.stderr += `\n${published.note}\n`;
 
     // Что именно мешает назвать ран успешным — решает failureForOutcome: агент мог не
@@ -728,6 +735,7 @@ export async function main(env: RunnerEnv = process.env as unknown as RunnerEnv)
       answer,
       artifacts: published.artifactRefs,
       repo: published.repo,
+      publicationOutcome: published.publicationOutcome,
       logUrl,
       outputTruncated: outcome.outputTruncated || logTruncated,
       failure: failureForOutcome(outcome.exitReason, collected.missing, publicationFailure),

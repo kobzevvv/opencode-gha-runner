@@ -134,6 +134,8 @@ export interface LaunchRequest {
    * (`ARTIFACTS_TOKEN_UNSET`), а не публикует куда попало.
    */
   publicationToken?: string;
+  /** `none` keeps read access for checkout but suppresses all repository writes. */
+  publicationMode?: 'git' | 'none';
   /**
    * Куда воркер отдаёт `LaunchResult` этого рана: `POST {resultUrl}` с тем же общим секретом
    * в `Authorization`, которым аутентифицировали launch. Адрес приходит в запросе, поэтому
@@ -225,6 +227,7 @@ export interface LaunchResult {
    * «коммита нет», а не выдуманный хэш.
    */
   repo: { fullName: string; branch: string; commit: string; baseRef?: string };
+  publicationOutcome?: 'published' | 'not_requested' | 'failed';
   /** Files uploaded to the API's run-scoped profile saveback endpoint. */
   profileChanges?: { files: Array<{ path: string; sha256: string; size: number }>; deletes: string[] };
   failure?: Failure;
@@ -579,6 +582,13 @@ export function validateLaunchRequest(input: unknown): LaunchRequest {
         }
       });
     }
+  }
+
+  if (req['publicationMode'] !== undefined && req['publicationMode'] !== 'git' && req['publicationMode'] !== 'none') {
+    issues.push('publicationMode: expected "git" | "none"');
+  }
+  if (req['publicationMode'] === 'none' && ((Array.isArray(req['outputs']) && req['outputs'].length > 0) || req['profileWorkspace'] !== undefined)) {
+    issues.push('publicationMode: "none" is only valid without outputs or profileWorkspace');
   }
 
   if (req['credentials'] !== undefined) {

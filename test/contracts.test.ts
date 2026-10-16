@@ -46,6 +46,12 @@ test('принимает корректный LaunchRequest', () => {
   assert.equal(spec.limits.timeoutMs, 300_000);
 });
 
+test('publicationMode none is valid only for text-only non-profile runs', () => {
+  assert.equal(validateLaunchRequest(validLaunchRequest({ publicationMode: 'none', outputs: [] } as never)).publicationMode, 'none');
+  assert.throws(() => validateLaunchRequest(validLaunchRequest({ publicationMode: 'none' } as never)));
+  assert.throws(() => validateLaunchRequest(validLaunchRequest({ publicationMode: 'invalid' } as never)));
+});
+
 test('имя движка — адрес воркера в нашем API, а не его внутренняя деталь', () => {
   // Одно и то же развёртывание регистрируется под разными именами
   // (`dynamic-ip-azure-agent-run`, `github-actions-agent-run`), поэтому воркер не должен
